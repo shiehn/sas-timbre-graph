@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timbre-graph-lab"
+version = "0.1.0"
+description = "Training lab for the S&S Timbre Graph plugin: self-supervised forward/delta timbre model over six coupled Surge XT roles"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [{ name = "Steve Hiehn", email = "stevehiehn@gmail.com" }]
+dependencies = [
+    # Reuse the proven Surge hosting / preset / probe / CLAP stack.
+    # [ml] extra brings torch + laion-clap + transformers.
+    "synth2surge[ml] @ git+https://github.com/shiehn/signals-to-surge@334d02d",
+    "numpy>=1.26,<3",
+    "librosa>=0.10.2",
+    "soundfile>=0.12",
+    "typer>=0.12",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "onnx>=1.16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+tglab = "timbre_graph_lab.cli:app"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/timbre_graph_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_surge: needs Surge XT VST3 + factory content installed (deselect with '-m \"not requires_surge\"')",
+]

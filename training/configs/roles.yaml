@@ -1,0 +1,52 @@
+# Role assignment rules for corpus bootstrapping.
+#
+# Metadata is a HINT, not a model input: these rules only gate which presets
+# become anchors / runtime menu entries. Render-time QC (silence, clipping,
+# register) is the real validity check. Order: reject rules win over accepts.
+#
+# `categories` match the patch's folder name (factory) or any path component
+# (3rd-party). `keywords` match the lowercased patch filename.
+
+reject_global:
+  categories: [FX, Sequences, Templates, Tutorials, MPE, Splits, Vocoder]
+  keywords:
+    - riser
+    - sweep
+    - impact
+    - cinematic
+    - drone
+    - atmosphere
+    - soundscape
+    - texture
+    - seq
+    - arp
+    - init
+    - template
+    - random
+    - transition
+
+roles:
+  kick:
+    categories: [Percussion, Drums]
+    keywords: [kick, "bass drum", bd909, bd808, "808 kick", thump]
+    reject_keywords: [boom, "sub drop", loop]
+  snare:
+    categories: [Percussion, Drums]
+    keywords: [snare, clap, rim, smack, crack]
+    reject_keywords: [loop, tail]
+  hat:
+    categories: [Percussion, Drums]
+    keywords: [hat, hh, shaker, ride, cymbal, tick, click, crash]
+    reject_keywords: [wind, air, atmosphere]
+  bass:
+    categories: [Basses]
+    keywords: [bass, sub, acid, mono]
+    reject_keywords: [drone, fx]
+  pad:
+    categories: [Pads, Chords, Polysynths]
+    keywords: [pad, chord, poly, strings, choir, warm, lush, sustained]
+    reject_keywords: [gate, one-shot, oneshot]
+  lead:
+    categories: [Leads, Plucks, Keys, Brass, Winds]
+    keywords: [lead, solo, pluck, bell, mallet, hook, melody, key]
+    reject_keywords: [fx, drone]
