@@ -40,9 +40,22 @@ _PRIORITY = ("cutoff", "resonance", "env", "attack", "decay", "sustain", "releas
 # frozen, so every measurement is averaged and every response is judged
 # against the anchor's own measured noise floor rather than a fixed epsilon.
 RENDER_AVG = 3
+# Hats are the one role built on noise oscillators; extra averaging buys back
+# the SNR the frozen-phase fix cannot reach there.
+HAT_EXTRA_AVG = 2
 MIN_SNR = 3.0
 # An anchor whose noise swamps everything cannot produce learnable targets.
 MAX_ANCHOR_NOISE_FRAC = 0.5
+
+# Cross-probing (C4): a preset probed under a sibling role's MIDI is valid
+# training data for that role. Restricted to the percussion trio, where the
+# anchor pools are thin (51-61) and the registers genuinely overlap; bass/pad/
+# lead are already data-rich.
+CROSS_PROBE_MAP = {
+    "kick": ["snare", "hat"],
+    "snare": ["kick", "hat"],
+    "hat": ["kick", "snare"],
+}
 
 
 _worker: RenderWorker | None = None
@@ -75,12 +88,59 @@ def _render_z(worker: RenderWorker, probe, k: int = RENDER_AVG) -> tuple[np.ndar
     return worker.render_descriptors(probe, k=k), qc
 
 
+def build_jobs(
+    entries: list[dict],
+    roles: list[str],
+    per_role: int,
+    singles: int,
+    multis: int,
+    drift: int,
+    cross_probe: bool = False,
+    render_avg: int = RENDER_AVG,
+) -> list[dict]:
+    """Expand corpus entries into (probe-role, preset) jobs. Pure — testable.
+
+    per_role <= 0 means ALL anchors for that role. Cross-probing adds
+    percussion-trio sibling jobs; (role, preset) pairs are deduped so a
+    preset that already carries the sibling role is not queued twice.
+    """
+    jobs: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(role: str, e: dict) -> None:
+        key = (role, e["preset_id"])
+        if key in seen:
+            return
+        seen.add(key)
+        avg = render_avg + (HAT_EXTRA_AVG if role == "hat" else 0)
+        jobs.append(
+            {
+                "role": role, "path": e["path"], "preset_id": e["preset_id"],
+                "singles": singles, "multis": multis, "drift": drift,
+                "render_avg": avg,
+            }
+        )
+
+    for role in roles:
+        picked = [e for e in entries if role in e["roles"]]
+        if per_role > 0:
+            picked = picked[:per_role]
+        for e in picked:
+            add(role, e)
+            if cross_probe:
+                for sibling in CROSS_PROBE_MAP.get(role, []):
+                    if sibling in roles:
+                        add(sibling, e)
+    return jobs
+
+
 def process_anchor(job: dict) -> dict:
     """Runs inside a worker process. Returns a stats dict."""
     assert _worker is not None and _cfg is not None
     t0 = time.time()
     role, path, preset_id = job["role"], job["path"], job["preset_id"]
     n_singles, n_multis, n_drift = job["singles"], job["multis"], job["drift"]
+    avg = job.get("render_avg", RENDER_AVG)
 
     out = shard_path(_cfg, role, preset_id)
     if out.exists():
@@ -90,7 +150,7 @@ def process_anchor(job: dict) -> dict:
         return {"preset_id": preset_id, "role": role, "status": "load-failed"}
 
     probe = get_probe(role, "short")
-    z_anchor, qc = _render_z(_worker, probe)
+    z_anchor, qc = _render_z(_worker, probe, k=avg)
     if not qc.ok:
         return {"preset_id": preset_id, "role": role, "status": f"qc-{qc.reason}"}
 
@@ -99,7 +159,7 @@ def process_anchor(job: dict) -> dict:
     candidates = _prioritize([p for p in policy["allowed"] if p in baseline])
 
     # --- measurement noise floor for THIS anchor ---
-    sigma = _worker.noise_floor(probe, k=4, avg=RENDER_AVG)
+    sigma = _worker.noise_floor(probe, k=4, avg=avg)
     sigma_norm = float(np.linalg.norm(sigma))
     anchor_norm = float(np.linalg.norm(z_anchor)) + 1e-9
     if sigma_norm / anchor_norm > MAX_ANCHOR_NOISE_FRAC:
@@ -112,11 +172,11 @@ def process_anchor(job: dict) -> dict:
     deltas = []
     for edit in sensitivity_pairs(candidates)[::2]:  # +eps only
         _worker.apply_delta(edit.delta)
-        z, q = _render_z(_worker, probe)
+        z, q = _render_z(_worker, probe, k=avg)
         deltas.append(np.linalg.norm(z - z_anchor) if q.ok else 0.0)
     _worker.restore_baseline()
     order = np.argsort(deltas)[::-1]
-    snr_floor = MIN_SNR * sigma_norm / np.sqrt(RENDER_AVG)
+    snr_floor = MIN_SNR * sigma_norm / np.sqrt(avg)
     sensitive = [
         candidates[i] for i in order[:TOP_K_SENSITIVE] if deltas[i] > snr_floor
     ]
@@ -153,7 +213,7 @@ def process_anchor(job: dict) -> dict:
         key = base_key(edit.base_offset)
         if key not in z0_cache:
             _worker.apply_delta(edit.base_offset)
-            z, q = _render_z(_worker, probe)
+            z, q = _render_z(_worker, probe, k=avg)
             if not q.ok:
                 n_bad += 1
                 continue
@@ -164,7 +224,7 @@ def process_anchor(job: dict) -> dict:
         for name, d in edit.delta.items():
             combined[name] = combined.get(name, 0.0) + d
         _worker.apply_delta(combined)
-        z1, q = _render_z(_worker, probe)
+        z1, q = _render_z(_worker, probe, k=avg)
         if not q.ok:
             n_bad += 1
             continue
@@ -194,7 +254,7 @@ def process_anchor(job: dict) -> dict:
     )
     dz = np.stack(Z1) - np.stack(Z0)
     med_snr = float(
-        np.median(np.linalg.norm(dz, axis=1)) / (sigma_norm / np.sqrt(RENDER_AVG) + 1e-9)
+        np.median(np.linalg.norm(dz, axis=1)) / (sigma_norm / np.sqrt(avg) + 1e-9)
     )
     return {
         "preset_id": preset_id, "role": role, "status": "ok",
@@ -212,21 +272,17 @@ def generate(
     drift: int = 4,
     workers: int = 1,
     roles: list[str] | None = None,
+    cross_probe: bool = False,
+    render_avg: int = RENDER_AVG,
 ) -> list[dict]:
     cfg = cfg or LabConfig()
     manifest = load_manifest(cfg)
     from timbre_graph_lab.config import ROLES
 
-    jobs = []
-    for role in roles or ROLES:
-        picked = [e for e in manifest["entries"] if role in e["roles"]][:per_role]
-        for e in picked:
-            jobs.append(
-                {
-                    "role": role, "path": e["path"], "preset_id": e["preset_id"],
-                    "singles": singles, "multis": multis, "drift": drift,
-                }
-            )
+    jobs = build_jobs(
+        manifest["entries"], roles or ROLES, per_role,
+        singles, multis, drift, cross_probe=cross_probe, render_avg=render_avg,
+    )
 
     results: list[dict] = []
     if workers <= 1:

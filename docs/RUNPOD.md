@@ -105,15 +105,29 @@ The command exits non-zero on failure, so you can chain it:
 
 ## 5. Generate + train
 
+**The quality-max run (recommended — quality was named the goal):** every
+usable anchor, percussion cross-probing, deeper local sampling, extra
+averaging where noise oscillators live, then the morph-edge graph:
+
 ```bash
-# scale-up run (~13 min on 32 vCPU)
-tglab gen --per-role 40 --workers $(( $(nproc) - 2 )) 2>&1 | tee /workspace/gen.log
+tglab gen --per-role 0 --cross-probe \
+  --singles 120 --multis 200 --drift 8 \
+  --workers $(( $(nproc) - 2 )) 2>&1 | tee /workspace/gen.log
 
-# or the full-corpus run (~48 min on 32 vCPU) — this is the one that
-# actually answers the generalization question
-tglab gen --per-role 150 --workers $(( $(nproc) - 2 )) 2>&1 | tee /workspace/gen.log
-
+tglab edges --k 4 2>&1 | tee /workspace/edges.log
 tglab train --epochs 80 2>&1 | tee /workspace/train.log
+```
+
+~2,500 anchor-jobs (2,145 anchors + ~350 percussion cross-probes) at
+~4 min each ≈ 165 core-hours ≈ **~5.5 h on 32 vCPU ≈ $6**, plus minutes for
+edges and seconds for training. Start it, check the first dozen log lines
+look healthy, walk away.
+
+Smaller variants if you want a fast read first:
+
+```bash
+# scale-up (~40 min on 32 vCPU with the deeper plans)
+tglab gen --per-role 40 --cross-probe --workers $(( $(nproc) - 2 ))
 ```
 
 Leave 2 cores free — each worker is a full Surge host and the box gets

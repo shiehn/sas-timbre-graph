@@ -123,18 +123,31 @@ a from-source build (~30-min spike, do before scaling past pilot);
 host's native preset load**, not absolute snapshots, so the fidelity gap
 cancels out for small morphs.
 
-**C6 — Runtime = precomputed morph graph, not live solving (the plugin's
-namesake).** The end-user surface is an X/Y pad morphing all six synths, with
-per-track unlink. That does **not** need real-time Jacobian solving in
-Electron: the moment six anchors are chosen, solve the whole morph field
-*offline* (seconds — grid of latent points → per-synth param snapshots along
-smooth trajectories), ship it to the panel as a **timbre graph artifact**, and
-runtime is pure interpolation: zero-latency, guaranteed smooth, trivially
-unlinkable (stop applying updates to that track), no ONNX in the plugin.
-Live leader-follower coupling (the proposal's §3.2) stays in the *lab test
-bench* where a Python process can afford it. Revisit real-time solving only
-if graph precompute feels too laggy after a manual patch tweak (it re-solves
-in background seconds).
+**C6 — Runtime = precomputed graph for the dial, tiny local solver for
+leader-follower (revised 2026-08-02 after product clarification).** The
+product has TWO interaction modes and both ship in the plugin:
+(a) the **unlabeled discovery dial** — a path through the timbre graph; all
+six patches morph along precomputed, validated trajectories; runtime is pure
+interpolation, and (b) **live leader-follower** — touch any synth's param
+(in Surge's own editor or programmatically) and the other linked tracks
+respond. (b) does *not* need ONNX or Python at runtime: per-anchor response
+matrices (~24 params × 20 features per synth) are baked into the graph
+artifact, and the follower solve is a damped least-squares over those —
+microseconds in plain TypeScript. Unlink = stop applying updates to that
+track. Integration prerequisite for (b): the engine must surface plugin
+parameter-change events for leader detection (tracktion/JUCE parameter
+listeners) — wiring task, noted for Phase 8.
+
+The graph has two data layers, both rendered by this lab:
+- **local**: perturbation shards around each anchor (the model's food, and
+  the per-anchor response matrices)
+- **edges** (`tglab edges`): validated morph routes between same-role
+  anchors — kNN proposals in descriptor space, each edge rendered along the
+  continuous-param interpolation and gated on QC + endpoint accuracy +
+  path detour. Audio decides structural compatibility (an edge between
+  patches with incompatible osc/filter structure misses its endpoint and is
+  rejected); no fingerprint bookkeeping. This is what lets the dial *travel*
+  between configurations instead of only wiggling around one.
 
 **C7 — No autograd-through-ONNX at runtime.**
 Where the solver does need Jacobians (lab test bench, graph precompute),
@@ -163,6 +176,26 @@ renders. "Followers just turn up the volume" is made impossible three ways.
 transpose a follower out of its role register (MIDI is sacred; so is the
 register the MIDI implies). Fine detune/dispersion stays allowed.
 
+**C11 — "Learn the param matrix alone" (considered, rejected 2026-08-02).**
+Proposal from product review: train a network on the joint parameter vectors
+of role-correct preset combinations — no rendering — so weights encode which
+follower params should move when leader params move. Rejected on two
+grounds, recorded here because the reasoning shapes the design:
+(1) *No label variance.* Every combination of individually-valid presets is
+labeled GOOD, and independently-drawn positives contain zero cross-layer
+statistical dependency — a discriminator trained on such data can only learn
+per-layer validity, which the curated preset list already provides for free.
+There is no signal in the combinations for any loss to extract.
+(2) *No cross-synth alignment without audio.* Six patch formats are six
+private languages; the param matrix gives each language's grammar but no
+dictionary between them. The shared descriptor space (rendered audio) is the
+interlingua that makes "move in the same direction" well-defined across
+different synth architectures — and within one synth it is what
+distinguishes audibly smooth directions from dead params and cliff edges.
+What survives from the idea: per-role parameter-manifold structure IS real
+and learnable without audio; we use a nonparametric version (anchors + trust
+radius), and a per-role preset-VAE prior remains a candidate V2 regularizer.
+
 ## What stays exactly as proposed
 
 - Forward/delta self-supervised objective, role conditioning, FiLM MLP (§3, §6.4)
@@ -179,7 +212,10 @@ tglab inventory   # scan factory + 3rd-party, keyword role rules -> corpus manif
 tglab policy      # introspect live host -> continuous live-safe allow-list
 tglab pilot       # baseline render + QC gate per role
 tglab gen         # FD screen -> seeded gesture plans -> .npz shards (resumable)
+                  #   --cross-probe (percussion trio) --render-avg N --per-role 0=all
+tglab edges       # kNN morph routes between same-role anchors, render-validated
 tglab train       # forward/delta proxy -> ONNX + manifest bundle
+tglab parity      # macOS<->Linux render parity gate (guards cloud runs)
 tglab bench       # render throughput on this machine
 ```
 

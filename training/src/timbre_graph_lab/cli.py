@@ -97,12 +97,16 @@ def pilot(per_role: int = 10) -> None:
 
 @app.command()
 def gen(
-    per_role: int = 10,
+    per_role: int = typer.Option(10, help="anchors per role; 0 = ALL"),
     singles: int = 60,
     multis: int = 80,
     drift: int = 4,
     workers: int = 1,
     role: list[str] = typer.Option(None, help="restrict to specific roles"),
+    cross_probe: bool = typer.Option(
+        False, help="also probe percussion anchors under sibling trio probes"
+    ),
+    render_avg: int = typer.Option(3, help="renders averaged per measurement"),
 ) -> None:
     """Generate perturbation dataset shards (resumable)."""
     from timbre_graph_lab.gen import generate
@@ -110,10 +114,25 @@ def gen(
     results = generate(
         LabConfig(), per_role=per_role, singles=singles, multis=multis,
         drift=drift, workers=workers, roles=list(role) if role else None,
+        cross_probe=cross_probe, render_avg=render_avg,
     )
     ok = sum(1 for r in results if r["status"] == "ok")
     skipped = sum(1 for r in results if r["status"] == "exists")
     console.print(f"done: {ok} new shards, {skipped} existing, {len(results)} total jobs")
+
+
+@app.command()
+def edges(
+    k: int = typer.Option(4, help="nearest neighbours proposed per anchor"),
+    points: int = typer.Option(5, help="interior interpolation points per edge"),
+    role: list[str] = typer.Option(None, help="restrict to specific roles"),
+) -> None:
+    """Render + validate morph edges between same-role anchors (needs shards)."""
+    from timbre_graph_lab.edges import build_graphs
+
+    build_graphs(
+        LabConfig(), roles=list(role) if role else None, k=k, n_points=points
+    )
 
 
 @app.command()
