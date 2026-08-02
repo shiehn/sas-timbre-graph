@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.0",
     "pyyaml>=6.0",
     "onnx>=1.16",
+    "onnxscript>=0.7",
 ]
 
 [project.optional-dependencies]

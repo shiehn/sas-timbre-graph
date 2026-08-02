@@ -59,6 +59,9 @@ class RenderWorker:
         self.cfg = cfg or LabConfig()
         self.host = PluginHost(self.cfg.surge_vst3, sample_rate=self.cfg.sample_rate)
         self._baseline_raw: dict[str, float] = {}
+        # params currently deviating from baseline — restoring only these
+        # keeps apply_delta at ~ms instead of rewriting all ~750 params
+        self._dirty: set[str] = set()
 
     def load_preset(self, fxp_path: str | Path) -> bool:
         result = load_fxp_into_host(Path(fxp_path), self.host)
@@ -66,6 +69,7 @@ class RenderWorker:
             return False
         self._fix_conditional_params(Path(fxp_path))
         self._baseline_raw = self.host.get_raw_values()
+        self._dirty = set()
         return True
 
     def _fix_conditional_params(self, fxp_path: Path) -> None:
@@ -115,7 +119,11 @@ class RenderWorker:
         return dict(self._baseline_raw)
 
     def restore_baseline(self) -> None:
-        self.host.set_raw_values(self._baseline_raw)
+        if self._dirty:
+            self.host.set_raw_values(
+                {n: self._baseline_raw[n] for n in self._dirty if n in self._baseline_raw}
+            )
+            self._dirty = set()
 
     def apply_delta(self, delta: dict[str, float]) -> dict[str, float]:
         """Apply a raw-space delta on top of the baseline; returns the clamped
@@ -129,6 +137,7 @@ class RenderWorker:
         self.restore_baseline()
         if target:
             self.host.set_raw_values(target)
+            self._dirty = set(target)
         return target
 
     def render(self, probe: Probe, settle: bool = True) -> np.ndarray:

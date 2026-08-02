@@ -106,6 +106,13 @@ def train_model(
     shards = load_shards(cfg, ROLES)
     if not shards:
         raise SystemExit("no shards found — run `tglab gen` first")
+    ref_params = shards[0]["meta"]["param_names"]
+    for s in shards:
+        if s["meta"]["param_names"] != ref_params:
+            raise SystemExit(
+                f"shard {s['meta']['preset_id']} has a different parameter "
+                "vector — regenerate shards with a single policy version"
+            )
 
     train = _stack(shards, "train")
     val = _stack(shards, "val") or _stack(shards, "test")

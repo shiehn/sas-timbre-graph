@@ -104,9 +104,14 @@ def process_anchor(job: dict) -> dict:
         n_singles=n_singles, n_multis=n_multis, n_drift_chains=n_drift, seed=SEED,
     )
 
-    param_names = sensitive  # shard stores the anchor's own sensitive subspace
+    # X0/DX live in the FIXED policy allow-list vector so column j means the
+    # same parameter in every shard; sensitivity only chose what to perturb.
+    # Params whose raw value is unreadable on this preset get a neutral 0.5.
+    param_names = list(policy["allowed"])
     p_index = {p: i for i, p in enumerate(param_names)}
-    x_anchor = np.array([baseline[p] for p in param_names], dtype=np.float32)
+    x_anchor = np.array(
+        [baseline.get(p, 0.5) for p in param_names], dtype=np.float32
+    )
 
     X0, DX, Z0, Z1, KINDS = [], [], [], [], []
     z0_cache: dict[str, np.ndarray] = {"": z_anchor}
