@@ -26,30 +26,58 @@ from timbre_graph_lab.config import LabConfig
 from timbre_graph_lab.probes import Probe
 
 SILENCE_RMS = 1e-4
-CLIP_LEVEL = 0.999
-CLIP_FRACTION = 0.01
+# True hard clipping is a FLAT-TOPPED waveform: many consecutive samples
+# pinned at the same extreme value, with the peak at or below unity.
+CLIP_PINNED_RUN = 8
+CLIP_CEILING = 1.0001
+# Absurd level (~+30 dBFS) means self-oscillation or instability, not music.
+RUNAWAY_PEAK = 32.0
 
 
 @dataclass
 class RenderQC:
     rms: float
     peak: float
-    clipped_fraction: float
+    pinned_run: int
     ok: bool
     reason: str = ""
 
 
+def _longest_pinned_run(mag: np.ndarray, peak: float) -> int:
+    """Longest run of consecutive samples sitting at the signal's maximum."""
+    at_peak = mag >= peak - 1e-6
+    if not at_peak.any():
+        return 0
+    edges = np.flatnonzero(
+        np.diff(np.concatenate(([0], at_peak.view(np.int8), [0])))
+    )
+    return int((edges[1::2] - edges[0::2]).max())
+
+
 def qc_audio(audio: np.ndarray) -> RenderQC:
+    """Reject renders that cannot yield a meaningful timbre measurement.
+
+    Loud is NOT broken. pedalboard returns float32 and never truncates at
+    1.0, and the descriptors compute spectral/temporal features on
+    RMS-normalized audio, so a hot preset measures the same as a quiet one.
+    An earlier peak-fraction test rejected 13% of anchors whose renders were
+    merely loud — measured peaks of 1.4-3.9 with pinned-runs of 1, i.e. not a
+    single flat-topped sample pair (2026-08-02). Judge the waveform shape
+    instead of its level.
+    """
     if len(audio) == 0 or not np.all(np.isfinite(audio)):
-        return RenderQC(0.0, 0.0, 0.0, False, "empty-or-nonfinite")
+        return RenderQC(0.0, 0.0, 0, False, "empty-or-nonfinite")
     rms = float(np.sqrt(np.mean(audio**2)))
-    peak = float(np.max(np.abs(audio)))
-    clipped = float(np.mean(np.abs(audio) >= CLIP_LEVEL))
+    mag = np.abs(audio)
+    peak = float(np.max(mag))
     if rms < SILENCE_RMS:
-        return RenderQC(rms, peak, clipped, False, "silent")
-    if clipped > CLIP_FRACTION:
-        return RenderQC(rms, peak, clipped, False, "clipping")
-    return RenderQC(rms, peak, clipped, True)
+        return RenderQC(rms, peak, 0, False, "silent")
+    if peak > RUNAWAY_PEAK:
+        return RenderQC(rms, peak, 0, False, "runaway-level")
+    pinned = _longest_pinned_run(mag, peak)
+    if peak <= CLIP_CEILING and pinned >= CLIP_PINNED_RUN:
+        return RenderQC(rms, peak, pinned, False, "clipping")
+    return RenderQC(rms, peak, pinned, True)
 
 
 class RenderWorker:
