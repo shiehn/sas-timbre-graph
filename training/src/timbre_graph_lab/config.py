@@ -28,15 +28,56 @@ def _default_workspace() -> Path:
     return Path(__file__).resolve().parents[2] / "workspace"
 
 
+# macOS first, then the Linux (.deb / tarball) layouts used on RunPod.
+# Env overrides win so a pod can point anywhere.
+_VST3_CANDIDATES = [
+    "/Library/Audio/Plug-Ins/VST3/Surge XT.vst3",
+    "/usr/lib/vst3/Surge XT.vst3",
+    "/usr/local/lib/vst3/Surge XT.vst3",
+    "~/.vst3/Surge XT.vst3",
+]
+_CONTENT_CANDIDATES = [
+    "/Library/Application Support/Surge XT",
+    "/usr/share/surge-xt",
+    "/usr/local/share/surge-xt",
+    "~/.local/share/surge-xt",
+]
+
+
+def _first_existing(env_var: str, candidates: list[str], fallback: str) -> Path:
+    env = os.environ.get(env_var)
+    if env:
+        return Path(env).expanduser()
+    for c in candidates:
+        p = Path(c).expanduser()
+        if p.exists():
+            return p
+    return Path(fallback).expanduser()
+
+
+def _default_vst3() -> Path:
+    return _first_existing("TGLAB_SURGE_VST3", _VST3_CANDIDATES, _VST3_CANDIDATES[0])
+
+
+def _content_root() -> Path:
+    return _first_existing(
+        "TGLAB_SURGE_CONTENT", _CONTENT_CANDIDATES, _CONTENT_CANDIDATES[0]
+    )
+
+
+def _default_factory() -> Path:
+    return _content_root() / "patches_factory"
+
+
+def _default_third_party() -> Path:
+    return _content_root() / "patches_3rdparty"
+
+
 @dataclass
 class LabConfig:
-    surge_vst3: Path = Path("/Library/Audio/Plug-Ins/VST3/Surge XT.vst3")
-    factory_patches_dir: Path = Path(
-        "/Library/Application Support/Surge XT/patches_factory"
-    )
-    third_party_patches_dir: Path = Path(
-        "/Library/Application Support/Surge XT/patches_3rdparty"
-    )
+    surge_vst3: Path = field(default_factory=_default_vst3)
+    factory_patches_dir: Path = field(default_factory=_default_factory)
+    third_party_patches_dir: Path = field(default_factory=_default_third_party)
     workspace: Path = field(default_factory=_default_workspace)
     sample_rate: int = 44100
 

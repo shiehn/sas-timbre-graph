@@ -63,14 +63,41 @@ class RenderWorker:
         # keeps apply_delta at ~ms instead of rewriting all ~750 params
         self._dirty: set[str] = set()
 
-    def load_preset(self, fxp_path: str | Path) -> bool:
+    def load_preset(self, fxp_path: str | Path, freeze: bool = True) -> bool:
         result = load_fxp_into_host(Path(fxp_path), self.host)
         if not result.success:
             return False
         self._fix_conditional_params(Path(fxp_path))
+        if freeze:
+            self.freeze_stochastic()
         self._baseline_raw = self.host.get_raw_values()
         self._dirty = set()
         return True
+
+    def freeze_stochastic(self) -> None:
+        """Measurement convention: make renders repeatable.
+
+        Surge randomizes oscillator start phase (when retrigger is off) and
+        applies per-voice drift, so two identical renders differ — measured
+        day one, the run-to-run descriptor noise EXCEEDED the finite-
+        difference signal for most patches (bass SNR 0.16). Forcing
+        retrigger on and drift to zero collapses that noise to ~0 for
+        patches without a noise oscillator (snare 24.2 -> 0.0009) and is
+        harmless for timbre statistics, which barely depend on start phase.
+
+        Patches that genuinely use the noise oscillator (hats especially)
+        stay stochastic; `render_descriptors(k>1)` averages those down and
+        `noise_floor()` measures what is left so the caller can gate on it.
+        """
+        forced = {}
+        for name in self.host.parameter_names():
+            lname = name.lower()
+            if "retrigger" in lname:
+                forced[name] = 1.0
+            elif "drift" in lname:
+                forced[name] = 0.0
+        if forced:
+            self.host.set_raw_values(forced)
 
     def _fix_conditional_params(self, fxp_path: Path) -> None:
         """Re-apply oscillator params under the *loaded* oscillator types.
@@ -152,3 +179,27 @@ class RenderWorker:
         return self.host.render_midi_mono(
             midi_messages=probe.messages, duration=probe.duration
         )
+
+    def render_descriptors(self, probe: Probe, k: int = 1) -> np.ndarray:
+        """Descriptor vector, averaged over k renders.
+
+        Averaging descriptors (not audio) is the right estimator for the
+        residual stochasticity of noise-oscillator patches: it cuts the
+        run-to-run spread by sqrt(k) without altering the expected timbre.
+        """
+        from timbre_graph_lab.descriptors import extract_descriptors
+
+        acc = None
+        for _ in range(max(1, k)):
+            z = extract_descriptors(self.render(probe), self.cfg.sample_rate)
+            acc = z if acc is None else acc + z
+        return acc / max(1, k)
+
+    def noise_floor(self, probe: Probe, k: int = 4, avg: int = 1) -> np.ndarray:
+        """Per-descriptor standard deviation of repeated identical renders.
+
+        This is the measurement's own uncertainty; any finite-difference
+        response smaller than a few times this is unmeasurable, not absent.
+        """
+        Z = np.stack([self.render_descriptors(probe, k=avg) for _ in range(k)])
+        return Z.std(axis=0)

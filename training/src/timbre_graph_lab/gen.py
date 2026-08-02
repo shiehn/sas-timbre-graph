@@ -36,6 +36,14 @@ TOP_K_SENSITIVE = 24
 _PRIORITY = ("cutoff", "resonance", "env", "attack", "decay", "sustain", "release",
              "shape", "width", "level", "balance", "feedback", "drive", "lfo")
 
+# Renders of noise-oscillator patches are not bit-identical even with phase
+# frozen, so every measurement is averaged and every response is judged
+# against the anchor's own measured noise floor rather than a fixed epsilon.
+RENDER_AVG = 3
+MIN_SNR = 3.0
+# An anchor whose noise swamps everything cannot produce learnable targets.
+MAX_ANCHOR_NOISE_FRAC = 0.5
+
 
 _worker: RenderWorker | None = None
 _cfg: LabConfig | None = None
@@ -58,9 +66,13 @@ def _prioritize(params: list[str]) -> list[str]:
     return sorted(params, key=key)[:SCREEN_CAP]
 
 
-def _render_z(worker: RenderWorker, probe) -> tuple[np.ndarray, object]:
+def _render_z(worker: RenderWorker, probe, k: int = RENDER_AVG) -> tuple[np.ndarray, object]:
+    """Averaged descriptors + QC on a single representative render."""
     audio = worker.render(probe)
-    return extract_descriptors(audio, worker.cfg.sample_rate), qc_audio(audio)
+    qc = qc_audio(audio)
+    if k <= 1:
+        return extract_descriptors(audio, worker.cfg.sample_rate), qc
+    return worker.render_descriptors(probe, k=k), qc
 
 
 def process_anchor(job: dict) -> dict:
@@ -86,7 +98,17 @@ def process_anchor(job: dict) -> dict:
     baseline = _worker.baseline_raw
     candidates = _prioritize([p for p in policy["allowed"] if p in baseline])
 
-    # --- sensitivity screen (single-sided FD) ---
+    # --- measurement noise floor for THIS anchor ---
+    sigma = _worker.noise_floor(probe, k=4, avg=RENDER_AVG)
+    sigma_norm = float(np.linalg.norm(sigma))
+    anchor_norm = float(np.linalg.norm(z_anchor)) + 1e-9
+    if sigma_norm / anchor_norm > MAX_ANCHOR_NOISE_FRAC:
+        return {
+            "preset_id": preset_id, "role": role, "status": "too-noisy",
+            "noise_frac": round(sigma_norm / anchor_norm, 4),
+        }
+
+    # --- sensitivity screen (single-sided FD), gated on SNR not a bare epsilon ---
     deltas = []
     for edit in sensitivity_pairs(candidates)[::2]:  # +eps only
         _worker.apply_delta(edit.delta)
@@ -94,9 +116,16 @@ def process_anchor(job: dict) -> dict:
         deltas.append(np.linalg.norm(z - z_anchor) if q.ok else 0.0)
     _worker.restore_baseline()
     order = np.argsort(deltas)[::-1]
-    sensitive = [candidates[i] for i in order[:TOP_K_SENSITIVE] if deltas[i] > 1e-3]
+    snr_floor = MIN_SNR * sigma_norm / np.sqrt(RENDER_AVG)
+    sensitive = [
+        candidates[i] for i in order[:TOP_K_SENSITIVE] if deltas[i] > snr_floor
+    ]
     if len(sensitive) < 4:
-        return {"preset_id": preset_id, "role": role, "status": "insensitive"}
+        return {
+            "preset_id": preset_id, "role": role, "status": "insensitive",
+            "snr_floor": round(float(snr_floor), 4),
+            "best_response": round(float(max(deltas)) if deltas else 0.0, 4),
+        }
 
     # --- gesture plan ---
     plan = build_plan(
@@ -161,10 +190,16 @@ def process_anchor(job: dict) -> dict:
     write_shard(
         _cfg, role, preset_id, param_names,
         np.stack(X0), np.stack(DX), np.stack(Z0), np.stack(Z1), KINDS,
+        noise_sigma=sigma,
+    )
+    dz = np.stack(Z1) - np.stack(Z0)
+    med_snr = float(
+        np.median(np.linalg.norm(dz, axis=1)) / (sigma_norm / np.sqrt(RENDER_AVG) + 1e-9)
     )
     return {
         "preset_id": preset_id, "role": role, "status": "ok",
         "n_samples": len(X0), "n_rejected": n_bad,
+        "median_snr": round(med_snr, 2),
         "seconds": round(time.time() - t0, 1),
     }
 

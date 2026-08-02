@@ -25,6 +25,44 @@ Two consequences drive everything below: **rendering is nearly free on the
 M4**, and **every measured render must be preceded by a throwaway settle
 render** (encoded in `worker.py`).
 
+## C0 — Renders were not reproducible (found + fixed, 2026-08-02)
+
+The single most important finding of day one, and it invalidated the first
+pilot. Surge runs oscillators at **free-running phase** (when retrigger is
+off) with **per-voice drift**, so two identical renders differ. Measured
+descriptor noise vs finite-difference signal on the original pipeline:
+
+| Role | SNR before | SNR after fix |
+|---|---|---|
+| bass | **0.16** | deterministic (σ≈0) |
+| pad | 0.68 | deterministic (σ≈0) |
+| hat | 1.34 | ~9 (noise oscillator, irreducible) |
+| snare | 36.9 | deterministic (σ≈0) |
+
+The training targets were mostly measurement noise. The parity checker
+caught it by failing a **Mac-vs-itself** comparison (delta-cosine 0.47 where
+1.0 is required).
+
+Fix (`worker.freeze_stochastic`, called on every preset load):
+force all `*retrigger*` on and all `*drift*` to zero as a **measurement
+convention**, average descriptors over `RENDER_AVG=3` renders, measure a
+per-anchor **noise floor** and gate the sensitivity screen on SNR ≥ 3 rather
+than a bare epsilon. Phase-locking barely affects timbre statistics, so the
+convention costs nothing and the before/after pair is consistent by
+construction.
+
+Result — within-anchor ridge predictability (held-out edits, same anchor):
+
+| | before | after |
+|---|---|---|
+| median across shards | 0.330 | **0.739** |
+| pad (worst role) | 0.006 | **0.711** |
+
+Mac-vs-itself parity now returns delta-cosine **1.0000**. Cost: ~4.5× more
+renders per anchor (~90 s/anchor single core), which is what the RunPod
+plan absorbs. **Any shard generated before this fix is garbage — regenerate,
+never mix.**
+
 ## Challenges / amendments to the proposal
 
 **C1 — Rendering is not the bottleneck; drop the render-farm plan.**
@@ -170,30 +208,24 @@ Scale-up (tomorrow+): `--per-role 40 --workers 8`, add cross-probing for
 kick/snare/hat coverage, then the two-synth no-ML gesture proof from the FD
 caches, then the six-synth bench.
 
+## RunPod — click-by-click
+
+Full runbook: **[RUNPOD.md](RUNPOD.md)**. Summary below.
+
 ## RunPod — what to actually set up
 
-**Answer to "can the M4 train it in 30 min": yes.** v0 (pilot corpus,
-descriptor basis, FiLM-MLP) trains in **minutes** on MPS; even a
-full-corpus v1 is an under-an-hour M4 job. Rendering (the feared cost) is
-~free per C1. So: **no RunPod needed for the pilot, and none tonight.**
+**Training is not the reason to rent anything** — the model trains in ~11 s
+on MPS. **Rendering the corpus is**, and after the C0 fix it costs ~90 s of
+one core per anchor. So the correct rental is **cores, not VRAM**:
 
-Where RunPod earns its keep later:
-1. **CLAP block extraction** over a full corpus (if C2's gate opens)
-2. **Model/hyper-parameter sweeps** (many v1 configs × seeds)
-3. **Linux container parity** for eventual reproducible cloud runs
+- **CPU pod, Compute Optimized (`cpu5c`), 32 vCPU / 64 GB, on-demand**
+- Plain Ubuntu template, 40 GB container disk, no network volume needed
+- Full-corpus run ≈ 48 min ≈ **under $1**
+- **Skip**: GPU pods (the GPU idles), A100/H100, Serverless, Spot
+  (preemption wastes the batch), network volumes for single sessions
 
-Recommended setup (one-time, ~20 min):
-- **Account + $25 credit**, SSH key, API key (store as `RUNPOD_API_KEY`)
-- **1× RTX 4090 24 GB, Secure Cloud, on-demand** (~$0.69/hr as of 2026-07-27
-  pricing) — the largest job in this plan fits comfortably in 24 GB
-- **Network Volume 100 GB** (~$7/mo) in the same region as 4090 stock —
-  shards/checkpoints/manifests live here; audio never leaves the Mac
-  (features only), so 100 GB is generous
-- Template: current `runpod/pytorch` 2.x/py3.11/cu12.x image, then
-  `pip install "git+https://github.com/shiehn/sas-timbre-graph#subdirectory=training"`
-- **Skip**: A100/L40S/H100 (nothing here needs >24 GB), Serverless (stateful
-  batch jobs), CPU render fleet (C1), Spot for training (use on-demand; Spot
-  is fine for shard-sharded feature extraction which is resumable)
+A GPU pod only becomes correct if C2's gate opens and CLAP embeddings enter
+the feature basis — then an RTX 4090 for the embedding pass is worthwhile.
 
 The proposal's Linux-parity gate (§9.5) stands: never render corpus data on
 Linux until the same preset + probe produces matching descriptors vs macOS;

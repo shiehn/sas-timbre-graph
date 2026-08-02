@@ -12,6 +12,7 @@ Typical pilot session (see docs/TRAINING.md for the full runbook):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -130,6 +131,49 @@ def train(
         LabConfig(), epochs=epochs, batch_size=batch_size, lr=lr,
         hidden=hidden, out_name=out_name,
     )
+
+
+@app.command()
+def parity(
+    write_to: str = typer.Option(..., "--write", help="where to save this platform's measurement"),
+    compare_to: str = typer.Option(None, "--compare", help="other platform's JSON to diff against"),
+    per_role: int = 3,
+) -> None:
+    """Measure render parity for this platform; optionally gate against another.
+
+    Run on macOS first (--write), then on the Linux pod with --compare.
+    Exits non-zero if the gate fails, so it can guard a cloud run.
+    """
+    import json as _json
+
+    from timbre_graph_lab.parity import compare as do_compare
+    from timbre_graph_lab.parity import measure
+    from timbre_graph_lab.parity import write as do_write
+
+    cfg = LabConfig()
+    data = measure(cfg, per_role=per_role)
+    out = do_write(data, write_to)
+    n_ok = sum(1 for s in data["samples"] if s["status"] == "ok")
+    console.print(f"{data['platform']}: {n_ok}/{data['n_samples']} ok -> {out}")
+
+    if compare_to:
+        other = _json.loads(Path(compare_to).read_text())
+        verdict = do_compare(data, other)
+        console.print(
+            f"content_identical={verdict['content_identical']} "
+            f"matched={verdict['n_matched']} "
+            f"delta_cos={verdict['delta_cosine_median']:.4f} "
+            f"baseline_rel_err={verdict['baseline_rel_err_median']:.4f}"
+        )
+        do_write(verdict, Path(write_to).with_suffix(".verdict.json"))
+        if verdict["PASS"]:
+            console.print("[green]PARITY PASS[/green] — cloud rendering is trustworthy")
+        else:
+            console.print(
+                "[red]PARITY FAIL[/red] — render corpus on macOS; use the pod "
+                "for features/training only"
+            )
+            raise typer.Exit(1)
 
 
 @app.command()

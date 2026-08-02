@@ -52,6 +52,7 @@ def write_shard(
     z0: np.ndarray,
     z1: np.ndarray,
     kinds: list[str],
+    noise_sigma: np.ndarray | None = None,
 ) -> Path:
     out = shard_path(cfg, role, preset_id)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +65,8 @@ def write_shard(
         "policy_version": POLICY_VERSION,
         "corpus_version": CORPUS_VERSION,
     }
+    if noise_sigma is None:
+        noise_sigma = np.zeros(z0.shape[1], dtype=np.float32)
     np.savez_compressed(
         out,
         X0=x0.astype(np.float32),
@@ -71,6 +74,7 @@ def write_shard(
         Z0=z0.astype(np.float32),
         Z1=z1.astype(np.float32),
         KIND=np.array([KIND_IDS[k] for k in kinds], dtype=np.int8),
+        SIGMA=noise_sigma.astype(np.float32),
         meta=json.dumps(meta),
     )
     return out
@@ -93,6 +97,9 @@ def load_shards(cfg: LabConfig, roles: list[str]) -> list[dict]:
                         "Z0": z["Z0"],
                         "Z1": z["Z1"],
                         "KIND": z["KIND"],
+                        "SIGMA": z["SIGMA"]
+                        if "SIGMA" in z.files
+                        else np.zeros(z["Z0"].shape[1], dtype=np.float32),
                     }
                 )
     return shards
