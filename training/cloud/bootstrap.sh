@@ -64,9 +64,17 @@ cd "$WORKDIR"
 [ -d sas-timbre-graph ] || git clone --depth 1 "$REPO_URL" sas-timbre-graph
 cd sas-timbre-graph/training
 
-log "Python env (torch CPU wheel — training here is seconds, rendering is the job)"
+log "Python env"
 uv venv --python 3.11 .venv >/dev/null
+# Force the CPU torch build FIRST. On Linux, PyPI's default torch drags in
+# the whole CUDA stack (nvidia-* wheels, several GB downloaded and unpacked)
+# which is pure waste here: this job renders on CPU and trains in ~11 s.
+# Installing it up front satisfies torch>=2.1 so the next resolve leaves it.
+uv pip install --python .venv/bin/python \
+  --index-url https://download.pytorch.org/whl/cpu torch >/dev/null
 uv pip install -e ".[dev]" --python .venv/bin/python >/dev/null
+.venv/bin/python -c "import torch; print('torch', torch.__version__, torch.__file__.split('/site-packages/')[0])"
+du -sh .venv | sed 's/^/venv size: /'
 
 cat >> ~/.bashrc <<'EOF'
 export PATH="$HOME/.local/bin:$PATH"

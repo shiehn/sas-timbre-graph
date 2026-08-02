@@ -137,13 +137,19 @@ def build_role_graph(
             )
             continue
 
-        endpoint_err, detour = edge_metrics(np.stack(z_rows), a["z"], b["z"])
+        z_path = np.stack(z_rows)
+        endpoint_err, detour = edge_metrics(z_path, a["z"], b["z"])
         valid = endpoint_err <= MAX_ENDPOINT_ERR and detour <= MAX_DETOUR
         edges.append(
             {
                 "a": a["preset_id"], "b": b["preset_id"], "valid": valid,
                 "endpoint_err": round(endpoint_err, 4),
                 "detour": round(detour, 4),
+                # the rendered route itself — kept for diagnostics and for
+                # detecting non-monotonic morphs later. The param trajectory
+                # needs no storage: it is the linear interpolation A->B over
+                # the shared allow-list.
+                "z_path": np.round(z_path, 4).tolist(),
                 **({} if valid else {"reason": "endpoint-or-detour"}),
             }
         )

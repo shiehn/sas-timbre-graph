@@ -37,13 +37,37 @@ logs will cost more than the compute. Budget $5 and you cannot overspend.
 5. Template: **RunPod Ubuntu 22.04** (any plain Ubuntu image; we install
    everything ourselves). If only PyTorch templates are offered, take one —
    it is Ubuntu underneath and works fine.
-6. Disk: **Container disk 40 GB**. You do **not** need a network volume for
-   a single session — results are ~200 MB and we copy them back at the end.
-   (Add a 50 GB network volume only if you plan several sessions.)
+6. Disk: **Container disk 100 GB** — see §1a below. You do **not** need a
+   network volume for a single session; results are ~120 MB total.
 7. Deploy On-Demand. **Do not use Spot** — a preemption mid-run wastes the
    whole batch. On-demand for under an hour costs cents.
 8. Wait for the pod to show **Running**, then **Connect → Start Web Terminal**
    (or SSH if you added your key).
+
+## 1a. Disk sizing — measured
+
+Everything this job produces is small because **no audio is ever written to
+disk**; renders live in RAM and only 20 descriptors survive per measurement.
+
+| What | Size | Notes |
+|---|---|---|
+| Shards, quality-max run | **~110 MB** | ~42 KB × ~2,500 anchors (DX is sparse → compresses hard) |
+| Model bundle | 8 MB | `model.pt` + ONNX + manifest |
+| Edge graph JSONs | ~10 MB | includes rendered descriptor paths |
+| Python venv | **1.3 GB** | torch dominates; CPU build (bootstrap forces it) |
+| Surge XT installed + content | ~500 MB | plus a 223 MB .deb, deleted after install |
+| apt packages | ~500 MB | X11/GL/audio libs the VST3 links |
+| uv download cache | ~1–2 GB | transient; `uv cache clean` reclaims it |
+| Base image | 2–20 GB | plain Ubuntu is small; PyTorch templates are huge |
+
+Realistic worst case ≈ 25 GB. **Provision 100 GB container disk.** At
+RunPod's ~$0.10/GB/month that is `100 × 0.10 / 730 × 6h ≈ **$0.08**` for the
+whole run — the headroom is free, and running out mid-run costs you the
+batch. If you attach a volume instead, `/workspace` (repo + venv + results)
+needs ~10 GB; Surge and apt still land on the container disk.
+
+The one thing that would change this: enabling CLAP features (deferred by
+challenge C2) downloads ~2 GB of model weights. Not in this run.
 
 ## 2. Bootstrap (one line, ~4 minutes)
 
