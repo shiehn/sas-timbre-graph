@@ -63,6 +63,33 @@ renders per anchor (~90 s/anchor single core), which is what the RunPod
 plan absorbs. **Any shard generated before this fix is garbage — regenerate,
 never mix.**
 
+## C0b — QC rejected loud renders as "clipped" (found + fixed 2026-08-02)
+
+Caught mid-corpus-run: the gate was discarding **13% of all anchors** for a
+defect that did not exist. It flagged any render with >1% of samples at or
+above 0.999 as clipping — a meaningless test for float audio, since
+pedalboard returns float32 and never truncates at unity. Measured on the
+rejected set: peaks of **1.4–4.0 with a longest pinned-run of ONE sample**,
+i.e. not a single flat-topped pair anywhere. They were simply hot patches.
+
+Re-tested against the corrected gate: **29 of 29 clipping rejects recovered**
+(Maj-Min Stab, Alias Pornography, Circus 1, the Kick Room family…), while all
+21 `silent` rejects stayed silent — those are the genuine C5 preset-load gap.
+
+The gate now judges waveform *shape*: reject only a flat-topped signal (≥8
+consecutive samples pinned at the peak with peak ≤ unity), plus a new
+runaway-level guard (~+30 dBFS) for self-oscillation.
+
+Crucially this was a **pure accept/reject change, so shards already on disk
+stayed valid** — spectral/temporal descriptors are computed on RMS-normalized
+audio, which a test now pins directly (level-invariant to 2%, while the
+explicit loudness dims still track level). Expected yield rose from ~65% to
+~78% of jobs.
+
+Lesson worth keeping: a QC threshold copied from fixed-point audio intuition
+(0 dBFS = ceiling) is wrong in a float pipeline. Verify what a gate rejects
+before trusting its rejection rate.
+
 ## Challenges / amendments to the proposal
 
 **C1 — Rendering is not the bottleneck; drop the render-farm plan.**
