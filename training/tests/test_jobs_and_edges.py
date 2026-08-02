@@ -86,3 +86,30 @@ def test_edge_metrics_flags_structural_mismatch():
     endpoint_err, detour = edge_metrics(path, z_a, z_b)
     assert endpoint_err > 0.35
     assert detour > 3.0
+
+
+def test_jobs_are_role_interleaved_so_any_prefix_is_balanced():
+    """A ~10 h corpus run must stay usable if stopped early."""
+    entries = [
+        {"preset_id": f"{r}{i}", "path": f"/{r}{i}", "roles": [r]}
+        for r in ("kick", "bass", "lead")
+        for i in range(5)
+    ]
+    jobs = build_jobs(entries, ["kick", "bass", "lead"], 0, 10, 10, 2)
+    first_six = [j["role"] for j in jobs[:6]]
+    assert first_six == ["kick", "bass", "lead", "kick", "bass", "lead"]
+    assert len(jobs) == 15
+
+
+def test_interleave_drains_small_pools_without_dropping_large_ones():
+    entries = (
+        [{"preset_id": f"k{i}", "path": f"/k{i}", "roles": ["kick"]} for i in range(2)]
+        + [{"preset_id": f"l{i}", "path": f"/l{i}", "roles": ["lead"]} for i in range(6)]
+    )
+    jobs = build_jobs(entries, ["kick", "lead"], 0, 10, 10, 2)
+    assert len(jobs) == 8
+    assert sum(1 for j in jobs if j["role"] == "kick") == 2
+    assert sum(1 for j in jobs if j["role"] == "lead") == 6
+    # kicks land early, leads keep flowing after the kick pool is exhausted
+    assert [j["role"] for j in jobs[:4]] == ["kick", "lead", "kick", "lead"]
+    assert all(j["role"] == "lead" for j in jobs[4:])

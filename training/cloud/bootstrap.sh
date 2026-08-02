@@ -31,6 +31,22 @@ apt-get install -y -qq --no-install-recommends \
   libxinerama1 libxcomposite1 libxcb1 libxkbcommon-x11-0 libfreetype6 \
   libfontconfig1 libasound2 libjack-jackd2-0 xvfb >/dev/null
 
+log "libstdc++ check"
+# Surge XT 1.3.4's Linux build needs GLIBCXX_3.4.30 (Ubuntu 22.04 toolchain).
+# RunPod's Ubuntu 20.04 images ship 3.4.28, and pedalboard reports the
+# mismatch only as "unsupported plugin format or scan failure" — so check
+# the symbol directly rather than trusting the plugin's error message.
+if ! strings /lib/x86_64-linux-gnu/libstdc++.so.6 2>/dev/null | grep -q GLIBCXX_3.4.30; then
+  log "GLIBCXX_3.4.30 missing — upgrading libstdc++6 from the toolchain PPA"
+  apt-get install -y -qq software-properties-common >/dev/null
+  add-apt-repository -y ppa:ubuntu-toolchain-r/test >/dev/null 2>&1
+  apt-get update -qq
+  apt-get install -y -qq --only-upgrade libstdc++6 >/dev/null
+  strings /lib/x86_64-linux-gnu/libstdc++.so.6 | grep -q GLIBCXX_3.4.30 \
+    && log "GLIBCXX_3.4.30 now present" \
+    || { echo "FATAL: could not provide GLIBCXX_3.4.30 — use an Ubuntu 22.04+ image"; exit 1; }
+fi
+
 log "Surge XT ${SURGE_VERSION}"
 if [ ! -d "/usr/lib/vst3/Surge XT.vst3" ]; then
   cd /tmp
@@ -40,6 +56,8 @@ if [ ! -d "/usr/lib/vst3/Surge XT.vst3" ]; then
   rm -f "$DEB"
 fi
 ls -d "/usr/lib/vst3/Surge XT.vst3" >/dev/null && log "VST3 present"
+MISSING=$(ldd "/usr/lib/vst3/Surge XT.vst3/Contents/x86_64-linux/Surge XT.so" 2>&1 | grep -i "not found" || true)
+[ -n "$MISSING" ] && { echo "FATAL: unresolved libraries:"; echo "$MISSING"; exit 1; }
 FACTORY=$(ls -d /usr/share/surge-xt/patches_factory 2>/dev/null || true)
 if [ -z "$FACTORY" ]; then
   log "Factory content missing from deb — fetching portable content"

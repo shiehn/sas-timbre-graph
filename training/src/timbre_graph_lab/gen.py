@@ -104,16 +104,16 @@ def build_jobs(
     percussion-trio sibling jobs; (role, preset) pairs are deduped so a
     preset that already carries the sibling role is not queued twice.
     """
-    jobs: list[dict] = []
+    by_role: dict[str, list[dict]] = {r: [] for r in roles}
     seen: set[tuple[str, str]] = set()
 
     def add(role: str, e: dict) -> None:
         key = (role, e["preset_id"])
-        if key in seen:
+        if key in seen or role not in by_role:
             return
         seen.add(key)
         avg = render_avg + (HAT_EXTRA_AVG if role == "hat" else 0)
-        jobs.append(
+        by_role[role].append(
             {
                 "role": role, "path": e["path"], "preset_id": e["preset_id"],
                 "singles": singles, "multis": multis, "drift": drift,
@@ -129,8 +129,24 @@ def build_jobs(
             add(role, e)
             if cross_probe:
                 for sibling in CROSS_PROBE_MAP.get(role, []):
-                    if sibling in roles:
-                        add(sibling, e)
+                    add(sibling, e)
+
+    # Round-robin across roles so ANY prefix of the queue is role-balanced.
+    # A full corpus run is ~10 h; interleaving means stopping early (or a pod
+    # dying) still yields a usable, balanced dataset instead of every kick and
+    # no leads. Small pools simply drop out once exhausted.
+    jobs: list[dict] = []
+    idx = 0
+    while True:
+        added = False
+        for role in roles:
+            bucket = by_role[role]
+            if idx < len(bucket):
+                jobs.append(bucket[idx])
+                added = True
+        if not added:
+            break
+        idx += 1
     return jobs
 
 
