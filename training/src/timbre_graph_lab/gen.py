@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from multiprocessing import get_context
+from pathlib import Path
 
 import numpy as np
 
@@ -280,6 +282,119 @@ def process_anchor(job: dict) -> dict:
     }
 
 
+MAX_ATTEMPTS = 2
+
+
+def _key(job: dict) -> str:
+    return f"{job['role']}/{job['preset_id']}"
+
+
+def _quarantine_path(cfg: LabConfig) -> Path:
+    return cfg.workspace / "quarantine.json"
+
+
+def load_quarantine(cfg: LabConfig) -> dict[str, str]:
+    p = _quarantine_path(cfg)
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def _quarantine(cfg: LabConfig, job: dict, reason: str) -> None:
+    p = _quarantine_path(cfg)
+    data = load_quarantine(cfg)
+    data[_key(job)] = reason
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=1, sort_keys=True))
+
+
+def _run_pool(cfg: LabConfig, jobs: list[dict], workers: int) -> list[dict]:
+    """Crash-tolerant pool.
+
+    A Surge worker can die outright (segfault) under heavy concurrency, and a
+    dead child poisons the whole ProcessPoolExecutor — `pool.map` then aborts
+    every remaining job. Observed live 2026-08-02: a ~10 h unattended run
+    died 52 s in. It was not OOM (cgroup peak 13.8 GB of 64 GB, oom_kill 0)
+    and no single preset was reproducibly fatal, so the design must tolerate
+    random child death rather than hunt for a culprit.
+
+    Normal path submits everything to ONE pool and streams completions, so a
+    slow job never gates a fast one. On a crash the pool is rebuilt around
+    whatever has not finished. Only when a whole pool dies without a single
+    completion do we suspect a genuinely fatal job: the head of the queue is
+    then re-run ALONE, and only a job that also dies by itself is convicted
+    and quarantined. Quarantine persists, so a resumed run skips it at once.
+    """
+    ctx = get_context("spawn")
+    quarantined = load_quarantine(cfg)
+    pending = [j for j in jobs if _key(j) not in quarantined]
+    if len(pending) < len(jobs):
+        print(f"skipping {len(jobs) - len(pending)} quarantined jobs", flush=True)
+
+    results: list[dict] = []
+    isolate: set[str] = set()
+    solo_failures: dict[str, int] = {}
+    total = len(pending)
+    done = 0
+
+    def finish(r: dict) -> None:
+        nonlocal done
+        done += 1
+        results.append(r)
+        print(f"[{done}/{total}] {r}", flush=True)
+
+    while pending:
+        solo = _key(pending[0]) in isolate
+        batch = pending[:1] if solo else pending
+        # jobs still owed a result; entries are removed only on success or
+        # quarantine, so anything left here is automatically retried
+        remaining = {_key(j): j for j in batch}
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=max(1, min(workers, len(batch))),
+                mp_context=ctx,
+                initializer=_init_worker,
+                initargs=(cfg,),
+            ) as pool:
+                futs = {pool.submit(process_anchor, j): j for j in batch}
+                for fut in as_completed(futs):
+                    job = futs[fut]
+                    key = _key(job)
+                    try:
+                        r = fut.result()
+                    except Exception as exc:
+                        if solo:
+                            solo_failures[key] = solo_failures.get(key, 0) + 1
+                            if solo_failures[key] >= MAX_ATTEMPTS:
+                                _quarantine(cfg, job, type(exc).__name__)
+                                del remaining[key]
+                                finish(
+                                    {
+                                        "preset_id": job["preset_id"],
+                                        "role": job["role"],
+                                        "status": "quarantined",
+                                        "error": type(exc).__name__,
+                                    }
+                                )
+                        continue
+                    del remaining[key]
+                    finish(r)
+        except BrokenProcessPool:
+            print("pool crashed — rebuilding", flush=True)
+
+        progressed = len(batch) - len(remaining)
+        batch_keys = {_key(j) for j in batch}
+        pending = [j for j in batch if _key(j) in remaining] + [
+            j for j in pending if _key(j) not in batch_keys
+        ]
+
+        if not progressed and pending:
+            head = _key(pending[0])
+            if head not in isolate:
+                isolate.add(head)
+                print(f"no completions — isolating {head}", flush=True)
+    return results
+
+
 def generate(
     cfg: LabConfig | None = None,
     per_role: int = 10,
@@ -308,14 +423,7 @@ def generate(
             results.append(r)
             print(f"[{i+1}/{len(jobs)}] {r}")
     else:
-        ctx = get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=workers, mp_context=ctx,
-            initializer=_init_worker, initargs=(cfg,),
-        ) as pool:
-            for i, r in enumerate(pool.map(process_anchor, jobs)):
-                results.append(r)
-                print(f"[{i+1}/{len(jobs)}] {r}")
+        results = _run_pool(cfg, jobs, workers)
 
     cfg.reports_dir.mkdir(parents=True, exist_ok=True)
     (cfg.reports_dir / "gen_report.json").write_text(json.dumps(results, indent=1))
