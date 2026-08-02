@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from concurrent.futures.process import BrokenProcessPool
-from multiprocessing import get_context
+from concurrent.futures import as_completed
 from pathlib import Path
 
 import numpy as np
@@ -306,92 +304,93 @@ def _quarantine(cfg: LabConfig, job: dict, reason: str) -> None:
     p.write_text(json.dumps(data, indent=1, sort_keys=True))
 
 
+JOB_TIMEOUT_S = 1800
+
+
+def _run_one(cfg: LabConfig, job: dict) -> dict:
+    """Run one job in its own OS process. A segfault is just an exit code."""
+    import os
+    import subprocess
+    import sys
+
+    from timbre_graph_lab.onejob import RESULT_TAG
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "timbre_graph_lab.onejob"],
+            input=json.dumps(job),
+            capture_output=True,
+            text=True,
+            timeout=JOB_TIMEOUT_S,
+            env={**os.environ, "TGLAB_WORKSPACE": str(cfg.workspace)},
+        )
+    except subprocess.TimeoutExpired:
+        return {"preset_id": job["preset_id"], "role": job["role"],
+                "status": "failed", "error": "timeout"}
+
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(RESULT_TAG):
+            return json.loads(line[len(RESULT_TAG):])
+
+    tail = (proc.stderr or proc.stdout).strip().splitlines()
+    return {
+        "preset_id": job["preset_id"], "role": job["role"],
+        "status": "failed",
+        "error": f"exit={proc.returncode}",
+        "detail": tail[-1][:160] if tail else "",
+    }
+
+
 def _run_pool(cfg: LabConfig, jobs: list[dict], workers: int) -> list[dict]:
-    """Crash-tolerant pool.
+    """Run jobs concurrently with one OS process per job.
 
-    A Surge worker can die outright (segfault) under heavy concurrency, and a
-    dead child poisons the whole ProcessPoolExecutor — `pool.map` then aborts
-    every remaining job. Observed live 2026-08-02: a ~10 h unattended run
-    died 52 s in. It was not OOM (cgroup peak 13.8 GB of 64 GB, oom_kill 0)
-    and no single preset was reproducibly fatal, so the design must tolerate
-    random child death rather than hunt for a culprit.
+    Surge dies randomly under concurrency. Inside a ProcessPoolExecutor a
+    dead child breaks the pool and takes every in-flight job with it, which
+    measured live as a livelock: crashes arrived every ~3.5 min while jobs
+    needed ~7 min, so long jobs never finished (4.16 -> 0.29 shards/min).
 
-    Normal path submits everything to ONE pool and streams completions, so a
-    slow job never gates a fast one. On a crash the pool is rebuilt around
-    whatever has not finished. Only when a whole pool dies without a single
-    completion do we suspect a genuinely fatal job: the head of the queue is
-    then re-run ALONE, and only a job that also dies by itself is convicted
-    and quarantined. Quarantine persists, so a resumed run skips it at once.
+    Process-per-job makes a crash local to the job that caused it: threads
+    here only wait on subprocesses, so nothing else is disturbed. A job that
+    dies in its own process MAX_ATTEMPTS times is genuinely fatal and gets
+    quarantined (persisted, so resumes skip it).
     """
-    ctx = get_context("spawn")
+    from concurrent.futures import ThreadPoolExecutor
+
     quarantined = load_quarantine(cfg)
     pending = [j for j in jobs if _key(j) not in quarantined]
     if len(pending) < len(jobs):
         print(f"skipping {len(jobs) - len(pending)} quarantined jobs", flush=True)
 
     results: list[dict] = []
-    isolate: set[str] = set()
-    solo_failures: dict[str, int] = {}
+    failures: dict[str, int] = {}
     total = len(pending)
     done = 0
-
-    def finish(r: dict) -> None:
-        nonlocal done
-        done += 1
-        results.append(r)
-        print(f"[{done}/{total}] {r}", flush=True)
+    n_crashed = 0
 
     while pending:
-        solo = _key(pending[0]) in isolate
-        batch = pending[:1] if solo else pending
-        # jobs still owed a result; entries are removed only on success or
-        # quarantine, so anything left here is automatically retried
-        remaining = {_key(j): j for j in batch}
-
-        try:
-            with ProcessPoolExecutor(
-                max_workers=max(1, min(workers, len(batch))),
-                mp_context=ctx,
-                initializer=_init_worker,
-                initargs=(cfg,),
-            ) as pool:
-                futs = {pool.submit(process_anchor, j): j for j in batch}
-                for fut in as_completed(futs):
-                    job = futs[fut]
-                    key = _key(job)
-                    try:
-                        r = fut.result()
-                    except Exception as exc:
-                        if solo:
-                            solo_failures[key] = solo_failures.get(key, 0) + 1
-                            if solo_failures[key] >= MAX_ATTEMPTS:
-                                _quarantine(cfg, job, type(exc).__name__)
-                                del remaining[key]
-                                finish(
-                                    {
-                                        "preset_id": job["preset_id"],
-                                        "role": job["role"],
-                                        "status": "quarantined",
-                                        "error": type(exc).__name__,
-                                    }
-                                )
+        batch, pending = pending, []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_run_one, cfg, j): j for j in batch}
+            for fut in as_completed(futs):
+                job = futs[fut]
+                key = _key(job)
+                r = fut.result()
+                if r.get("status") == "failed":
+                    n_crashed += 1
+                    failures[key] = failures.get(key, 0) + 1
+                    if failures[key] < MAX_ATTEMPTS:
+                        pending.append(job)
+                        print(f"    retry {key}: {r.get('error')}", flush=True)
                         continue
-                    del remaining[key]
-                    finish(r)
-        except BrokenProcessPool:
-            print("pool crashed — rebuilding", flush=True)
-
-        progressed = len(batch) - len(remaining)
-        batch_keys = {_key(j) for j in batch}
-        pending = [j for j in batch if _key(j) in remaining] + [
-            j for j in pending if _key(j) not in batch_keys
-        ]
-
-        if not progressed and pending:
-            head = _key(pending[0])
-            if head not in isolate:
-                isolate.add(head)
-                print(f"no completions — isolating {head}", flush=True)
+                    _quarantine(cfg, job, str(r.get("error")))
+                    r = {**r, "status": "quarantined"}
+                done += 1
+                results.append(r)
+                print(f"[{done}/{total}] {r}", flush=True)
+        if pending:
+            print(f"retrying {len(pending)} failed job(s)", flush=True)
+    if n_crashed:
+        print(f"note: {n_crashed} job-process failure(s), contained", flush=True)
     return results
 
 
