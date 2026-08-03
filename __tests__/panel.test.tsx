@@ -926,3 +926,52 @@ describe('generation uses the standard LLM machinery, prompt derived from role',
     expect(clip!.notes.length).toBeGreaterThan(0);
   });
 });
+
+describe('MIDI generation never touches the sound', () => {
+  /**
+   * The shipped anchors are what the morph was MEASURED against — the dial's
+   * verified behaviour is a property of those exact patches. If generating
+   * notes could re-pick or re-apply a preset, the graph would silently stop
+   * describing the instrument the user is hearing.
+   */
+  it('calls no preset, shuffle, or parameter API while writing notes', async () => {
+    const forbidden = {
+      applySurgeFxpPreset: jest.fn(),
+      shufflePreset: jest.fn(),
+      setSynthParameters: jest.fn(),
+      loadPlugin: jest.fn(),
+      setTrackPreset: jest.fn(),
+    };
+    const host = {
+      ...forbidden,
+      getMusicalContext: async () => ({
+        key: 'C', mode: 'minor', bpm: 120, bars: 4, genre: null,
+        timeSignature: '4/4', chordProgression: [], contractPrompt: null,
+      }),
+      getGenerationContext: async () => ({
+        chordProgression: { key: { tonic: 'C', mode: 'minor' }, chordsWithTiming: [], genre: null },
+        concurrentTracks: [],
+      }),
+      generateWithLLM: async () => ({
+        content: JSON.stringify({
+          notes: [{ pitch: 60, startBeat: 0, durationBeats: 1, velocity: 100 }],
+        }),
+      }),
+      writeMidiClip: jest.fn(async () => undefined),
+    };
+
+    const adapter = createTimbreGraphAdapter({} as never);
+    for (const role of ['kicks', 'snares', 'hats', 'bass', 'pads', 'leads']) {
+      await adapter.generation!.generate!(
+        { role, handle: { id: `e-${role}`, name: role, role } } as never,
+        { host, updateTrack: () => {} } as never,
+      );
+    }
+
+    expect(host.writeMidiClip).toHaveBeenCalledTimes(6);
+    for (const [name, fn] of Object.entries(forbidden)) {
+      expect(fn).not.toHaveBeenCalled();
+      expect(`${name}:${fn.mock.calls.length}`).toBe(`${name}:0`);
+    }
+  });
+});
