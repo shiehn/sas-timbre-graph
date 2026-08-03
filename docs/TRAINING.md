@@ -323,14 +323,60 @@ Spectral axes are the weak ones (percussion cannot reach them at all), which
 inverts the intuition the proposal started from: **the ensemble couples through
 envelope and dynamics, not brightness.**
 
+### C13f — The morph graph is BUILT (the artifact the panel consumes)
+
+`morph.py` precomputes the dial: for a chosen anchor set and one semantic axis
+it stores an **absolute parameter snapshot per synth at every control
+position**, each render-verified on the way. Runtime is then pure
+interpolation — `params_at()` is the whole engine, a handful of lines that port
+trivially to TypeScript. No solver, no model, no ONNX, zero latency, and
+per-track unlink is just "stop applying this row".
+
+Built by **walking** rather than solving each position independently: every
+step targets a small increment and warm-starts from the previous solution, so
+steps stay near the radius where the Jacobian is valid (the C13b failure) and
+consecutive snapshots stay close.
+
+**First real graph — axis `softer`, 9 control points, built in 159 s (44 KB):**
+
+| role | negative end | positive end | monotonicity | max param jump |
+|---|---|---|---|---|
+| kick | +0.55 | +0.62 | 0.75 | 0.053 |
+| snare | *holds* | **+0.80** | 1.00 | 0.019 |
+| hat | *holds* | +0.58 | 1.00 | 0.044 |
+| bass | +0.48 | +0.56 | 1.00 | 0.023 |
+| pad | +0.49 | **+0.71** | 0.88 | 0.020 |
+| lead | **+0.70** | +0.64 | 0.88 | 0.033 |
+
+- **roles moving 6/6**, directions working **10/12**
+- median endpoint cosine **0.599**, median monotonicity **0.938**
+- worst parameter jump **0.053**, and at runtime the largest parameter change
+  per 1% of dial travel is **0.004** — the dial is smooth to the touch.
+
+Endpoint cosines closely track the achievability table (snare 0.80 vs 0.82,
+pad 0.71 vs 0.76, bass 0.56 vs 0.56), so the walk loses almost nothing versus
+refining a single target.
+
+**Expressiveness is asymmetric.** Snare and hat get *softer* but cannot get
+*harder* — already-tight patches have nowhere to go — so they hold still on
+that side rather than inventing motion. Two of twelve directions are dead and
+that is the honest answer, not a defect.
+
+**A reporting lesson, for the third time.** The first quality read looked bad
+(hat "median cosine 0.02") because it averaged every control point: near the
+centre the move is deliberately tiny so its measured direction is mostly render
+noise, and it also averaged the dead direction into the live one. `quality()`
+now reports **per direction, at the endpoints**. Same mistake as the QC gate
+and the unstandardized descriptors — *check what a metric is actually
+averaging before believing it.*
+
 ### What to build next
 
-1. **Morph-graph artifact**: sweep a shared axis, refine at each control point,
-   store per-role parameter snapshots (the plugin then only interpolates).
-2. Panel wiring: six tracks, dial, per-track unlink.
-3. Cheaper achievability: 5.6 s per (role, axis) pair means testing 3 shared
-   axes across 6 roles costs ~100 s serial, ~20 s in parallel — fine on
-   anchor selection, worth caching per preset.
+1. Panel wiring: six tracks, dial, per-track unlink, reading this artifact.
+2. `tglab morph` CLI command wrapping `build_morph_graph`.
+3. Cheaper achievability: 5.6 s per (role, axis) pair, so 3 shared axes across
+   6 roles is ~100 s serial / ~20 s parallel — worth caching per preset.
+4. Multi-axis dials (X/Y) once one axis is proven in the panel.
 
 Semantic axes are defined in descriptor space (brighter / fuller / snappier /
 longer / rougher) — interpretable, role-agnostic to state, role-specific to
