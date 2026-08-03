@@ -224,12 +224,64 @@ rather than hand-tuned: probe which axes an anchor can actually express, then
 drive each role along its own best axis. One dial, six coherent moves, each in
 the vocabulary its synth actually has.
 
+### C13d — Closed-loop refiner: BUILT and validated
+
+`refine.py` = Jacobian-seeded line search + adaptive coordinate refinement
+against real renders, with an injectable `measure` so the search is testable
+without audio. Objective is on-axis projection with a mild off-axis penalty.
+
+Measured on real Surge, 60 renders per target, six anchors × four axes:
+
+| | |
+|---|---|
+| pairs it chose to move | **10 of 24** |
+| median cosine where it moved | **+0.523** |
+| of those, above 0.4 | **10 of 10** |
+| pairs it declined | 14 |
+| speed | **5.8 s per target** (60 renders) |
+
+**Declining is a feature, not a miss.** A kick asked to get "brighter" has
+almost no reachable timbre space (11/34 live params), and the honest answer is
+to leave it alone rather than invent a move — which is also the proposal's own
+low-confidence fallback. So the instrument either moves convincingly (0.45 to
+0.83) or stays put; it never produces incoherent motion. Reporting that
+averages declines together with real moves is meaningless, hence
+`RefineResult.moved`.
+
+The refiner also rescues cases open-loop got *backwards*: snare/longer
+−0.11 → **+0.83**, hat/longer −0.68 → **+0.45**, lead/snappier −0.56 → **+0.63**.
+
+Caching the anchor's baseline descriptors (instead of re-rendering them on
+every evaluation) cut ~15 s per target to 5.8 s — each measurement now costs
+about one render rather than four.
+
+### The measured coupling policy
+
+Not hand-tuned, not learned — probed:
+
+| role | best axis | cosine |
+|---|---|---|
+| snare | longer | **+0.83** |
+| lead | longer | +0.73 |
+| bass | snappier | +0.64 |
+| pad | snappier | +0.59 |
+| hat | longer | +0.45 |
+| kick | *(declined all four)* | — |
+
+This is C13c made operational: at probe time, test each anchor against the
+axis library and record what it can express. The dial then drives every role
+along its own best axis, which is what makes one control produce six coherent
+moves instead of five wrong ones.
+
 ### What to build next
 
-1. **Closed-loop refiner** (~25 renders per target) as the graph-builder core.
-2. **Per-anchor axis achievability** at probe time → fills the coupling matrix
-   from measurement instead of taste.
-3. Then the morph-graph artifact + panel wiring.
+1. **Axis achievability at probe time** → emit the coupling table above
+   automatically as part of the response set.
+2. **Morph-graph artifact**: sweep the dial, refine at each control point,
+   store per-role parameter snapshots (the plugin then only interpolates).
+3. Panel wiring: six tracks, dial, per-track unlink.
+4. Kick needs its own axes (click / pitch / body) — the spectral ones are
+   inexpressible for it.
 
 Semantic axes are defined in descriptor space (brighter / fuller / snappier /
 longer / rougher) — interpretable, role-agnostic to state, role-specific to
