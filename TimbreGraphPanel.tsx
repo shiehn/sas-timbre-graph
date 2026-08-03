@@ -133,6 +133,11 @@ export function MorphSection({
 }) {
   const [graph, setGraph] = useState<MorphGraph | null>(null);
   const [control, setControl] = useState(0);
+  // Gesture scale. x1 is the render-verified magnitude — measured at 3-10%
+  // per parameter end-to-end, which reads as near-zero to the ear. Depth
+  // multiplies the DELTAS (relative mode), trading verified territory for
+  // audible drama; in a discovery tool the user's ear is the judge past x1.
+  const [depth, setDepth] = useState(3);
   const [linked, setLinked] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
@@ -259,17 +264,25 @@ export function MorphSection({
           const live = resolveTrackIds(role);
           const targets = live.length > 0 ? live : t.track_id ? [t.track_id] : [];
           if (targets.length === 0) continue;
+          // DELTAS from the dial centre, scaled by depth, applied RELATIVE to
+          // each track's live parameters — the morph rides on whatever sound
+          // the track currently has instead of snapping it to the artifact's
+          // absolute operating point. Only params the graph actually moves
+          // are sent, so untouched controls stay untouched.
           const values = paramsAt(graph.control_points, t.snapshots, value);
+          const centre = paramsAt(graph.control_points, t.snapshots, 0);
           const params: Record<string, number> = {};
           t.param_names.forEach((name, i) => {
-            params[name] = values[i];
+            const delta = (values[i] - centre[i]) * depth;
+            if (Math.abs(delta) > 1e-6) params[name] = delta;
           });
+          if (Object.keys(params).length === 0) continue;
           if (typeof host.setSynthParameters !== 'function') {
             setStatus('This host predates SDK 2.57.0 — parameter writes unavailable.');
             return;
           }
           for (const id of targets) {
-            await host.setSynthParameters(id, params);
+            await host.setSynthParameters(id, params, 0, { relative: true });
             wrote += 1;
           }
         }
@@ -287,7 +300,7 @@ export function MorphSection({
         }
       }
     },
-    [graph, host, linked, resolveTrackIds],
+    [graph, host, linked, resolveTrackIds, depth],
   );
 
   const onDial = useCallback(
@@ -375,6 +388,19 @@ export function MorphSection({
         <span style={{ fontWeight: 600 }}>Morph</span>
         <span style={{ opacity: 0.6 }}>axis: {graph.axis.name}</span>
         <span style={{ flex: 1 }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: 0.75 }}>
+          depth
+          <select
+            aria-label="morph depth"
+            value={depth}
+            onChange={(e) => setDepth(Number(e.target.value))}
+            style={{ font: 'inherit', fontSize: 11 }}
+          >
+            {[1, 2, 3, 5, 8].map((d) => (
+              <option key={d} value={d}>×{d}</option>
+            ))}
+          </select>
+        </label>
         <button
           type="button"
           onClick={() => void clearGraph()}

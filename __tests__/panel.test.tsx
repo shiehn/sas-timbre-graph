@@ -397,6 +397,7 @@ describe('dial drives LIVE tracks, not stamped ids', () => {
 
   it('writes to the resolver-supplied ids even when the stamp is stale', async () => {
     const writes: string[] = [];
+    const payloads: Array<{ params: Record<string, number>; options?: { relative?: boolean } }> = [];
     const graph = {
       version: 'morph-graph-v1',
       axis: { name: 'softer', vector: [] },
@@ -412,7 +413,12 @@ describe('dial drives LIVE tracks, not stamped ids', () => {
     const host = {
       getProjectData: async (k: string) => (k.endsWith('morph') ? graph : null),
       setProjectData: async () => {},
-      setSynthParameters: async (trackId: string) => { writes.push(trackId); },
+      setSynthParameters: async (
+        trackId: string,
+        params: Record<string, number>,
+        _idx?: number,
+        options?: { relative?: boolean },
+      ) => { writes.push(trackId); payloads.push({ params, options }); },
     };
     const { container, cleanup } = render(
       createElement(MorphSection, {
@@ -434,6 +440,11 @@ describe('dial drives LIVE tracks, not stamped ids', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(writes).toEqual(['LIVE-1464']);            // never DEAD-1235
+    // deltas ride the live sound: relative mode, scaled from the dial centre
+    expect(payloads[0].options).toEqual({ relative: true });
+    const delta = payloads[0].params['a'];
+    expect(Math.sign(delta)).toBe(1);                 // +0.9 of the dial => up
+    expect(Math.abs(delta)).toBeGreaterThan(0.05);    // depth-scaled, not raw
     cleanup();
   });
 });
