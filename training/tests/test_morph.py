@@ -30,6 +30,7 @@ def _track(role="pad", n=6, n_points=5, move=True):
         cos.append(1.0 if move else 0.0)
         proj.append(float(t) if move else 0.0)
     return RoleTrack(role=role, preset_id="p", name=role,
+                     fxp_path=f"/fake/{role}.fxp",
                      param_names=[f"p{i}" for i in range(n)],
                      baseline=base, snapshots=snaps, cosine=cos,
                      projection=proj), controls

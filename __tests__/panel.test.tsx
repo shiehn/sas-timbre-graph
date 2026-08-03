@@ -173,3 +173,133 @@ describe('TimbreGraphPanel rendering', () => {
     cleanup();
   });
 });
+
+describe('TimbreGraphPanel import flow', () => {
+  function render(el: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(el));
+    return {
+      container,
+      cleanup: () => {
+        act(() => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  it('offers an import affordance in the empty state', () => {
+    const { container, cleanup } = render(
+      createElement(TimbreGraphPanel, { host: {} } as never),
+    );
+    expect(container.textContent).toContain('Import morph graph');
+    expect(container.querySelector('input[type="file"]')).not.toBeNull();
+    cleanup();
+  });
+
+  it('creates a track per role, loads Surge, restores the fxp, stamps ids', async () => {
+    const calls: string[] = [];
+    let savedGraph: string | null = null;
+    const host = {
+      getProjectData: async () => null,
+      setProjectData: async (_k: string, v: string) => {
+        savedGraph = v;
+      },
+      createTrack: async ({ name, role }: { name: string; role: string }) => {
+        calls.push(`create:${role}`);
+        return { id: `engine-${role}`, name, dbId: `db-${role}` };
+      },
+      loadSynthPlugin: async (trackId: string, plugin: string) => {
+        calls.push(`surge:${trackId}:${plugin}`);
+        return 0;
+      },
+      applySurgeFxpPreset: async (trackId: string, fxp: string) => {
+        calls.push(`fxp:${trackId}:${fxp.split('/').pop()}`);
+      },
+    };
+    const graph = {
+      version: 'morph-graph-v1',
+      axis: { name: 'softer', vector: [] },
+      control_points: [-1, 0, 1],
+      roles: {
+        kick: {
+          role: 'kick', preset_id: 'k', name: 'Kick 909ish',
+          fxp_path: '/fake/Kick 909ish.fxp',
+          param_names: ['a'], baseline: [0.5],
+          snapshots: [[0.4], [0.5], [0.6]], cosine: [1, 1, 1], declined: false,
+        },
+      },
+    };
+    const file = new File([JSON.stringify(graph)], 'morph-softer.json', {
+      type: 'application/json',
+    });
+
+    const { container, cleanup } = render(
+      createElement(TimbreGraphPanel, { host } as never),
+    );
+    await act(async () => Promise.resolve());
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      // FileReader/text() + the async import chain need a couple of ticks
+      await new Promise((r) => setTimeout(r, 0));
+      await Promise.resolve();
+    });
+
+    expect(calls).toEqual([
+      'create:kick',
+      'surge:engine-kick:Surge XT',
+      'fxp:engine-kick:Kick 909ish.fxp',
+    ]);
+    expect(savedGraph).not.toBeNull();
+    const stamped = JSON.parse(savedGraph as unknown as string);
+    expect(stamped.roles.kick.track_id).toBe('engine-kick');
+    cleanup();
+  });
+
+  it('survives a missing fxp on this machine (track still created)', async () => {
+    const calls: string[] = [];
+    const host = {
+      getProjectData: async () => null,
+      setProjectData: async () => {},
+      createTrack: async ({ role }: { role: string }) => ({
+        id: `engine-${role}`, name: role, dbId: role,
+      }),
+      loadSynthPlugin: async () => 0,
+      applySurgeFxpPreset: async () => {
+        calls.push('fxp-attempted');
+        throw new Error('FILE_NOT_FOUND');
+      },
+    };
+    const graph = {
+      version: 'morph-graph-v1',
+      axis: { name: 'softer', vector: [] },
+      control_points: [-1, 0, 1],
+      roles: {
+        pad: {
+          role: 'pad', preset_id: 'p', name: 'Gone',
+          fxp_path: '/missing.fxp',
+          param_names: ['a'], baseline: [0.5],
+          snapshots: [[0.4], [0.5], [0.6]], cosine: [1, 1, 1], declined: false,
+        },
+      },
+    };
+    const file = new File([JSON.stringify(graph)], 'g.json');
+    const { container, cleanup } = render(
+      createElement(TimbreGraphPanel, { host } as never),
+    );
+    await act(async () => Promise.resolve());
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(calls).toEqual(['fxp-attempted']);
+    // panel proceeded to the loaded state despite the missing preset
+    expect(container.textContent).toContain('Chord Pad');
+    cleanup();
+  });
+});

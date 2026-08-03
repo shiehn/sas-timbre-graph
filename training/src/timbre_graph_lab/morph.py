@@ -45,6 +45,9 @@ class RoleTrack:
     role: str
     preset_id: str
     name: str
+    # Path to the anchor's .fxp so the panel can restore the exact preset
+    # (host.applySurgeFxpPreset) before applying snapshots on top of it.
+    fxp_path: str
     param_names: list[str]
     baseline: np.ndarray
     snapshots: list[np.ndarray] = field(default_factory=list)  # absolute raw
@@ -60,6 +63,7 @@ class RoleTrack:
     def to_dict(self) -> dict:
         return {
             "role": self.role, "preset_id": self.preset_id, "name": self.name,
+            "fxp_path": self.fxp_path,
             "param_names": self.param_names,
             "baseline": self.baseline.tolist(),
             "snapshots": [s.tolist() for s in self.snapshots],
@@ -156,6 +160,7 @@ def build_morph_graph(
         )
         tracks[role] = RoleTrack(
             role=role, preset_id=resp.preset_id, name=resp.name,
+            fxp_path=str(paths[role]),
             param_names=list(resp.param_names), baseline=resp.baseline.copy(),
             snapshots=snaps, cosine=cos, projection=proj,
         )

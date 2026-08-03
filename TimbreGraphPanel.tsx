@@ -50,8 +50,10 @@ interface MorphGraph {
     {
       role: string;
       preset_id: string;
-      /** Engine/DB track id. Track identity is never a display name. */
+      /** Engine/DB track id, stamped at setup time. Never a display name. */
       track_id?: string;
+      /** Path to the anchor's .fxp, restored at setup via applySurgeFxpPreset. */
+      fxp_path?: string;
       name: string;
       param_names: string[];
       baseline: number[];
@@ -199,6 +201,68 @@ export function TimbreGraphPanel({ host }: PluginUIProps) {
     [apply],
   );
 
+  /**
+   * Import a morph-graph file and stand the instrument up: one track per
+   * role, Surge XT loaded, the anchor preset restored from its .fxp, and the
+   * engine track id stamped into the graph so every later parameter write
+   * addresses the track by id (never by name). Idempotent per import — it
+   * always creates a fresh set of tracks it owns.
+   */
+  const importGraphFile = useCallback(
+    async (file: File) => {
+      if (!host) return;
+      setStatus('Importing…');
+      try {
+        const text = await new Promise<string>((resolve, reject) => {
+          // FileReader rather than File.text(): identical result, but present
+          // in every runtime this panel meets (File.text is missing in some).
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(r.error ?? new Error('could not read file'));
+          r.readAsText(file);
+        });
+        const parsed = JSON.parse(text) as MorphGraph;
+        if (!parsed?.roles || !parsed?.control_points?.length) {
+          setStatus('Not a morph graph: missing roles/control_points.');
+          return;
+        }
+        const roleIds = Object.keys(parsed.roles);
+        for (const role of roleIds) {
+          const t = parsed.roles[role];
+          setStatus(`Setting up ${role}…`);
+          const handle = await host.createTrack({
+            name: `TG ${ROLE_LABELS[(role as Role)] ?? role}`,
+            role,
+          });
+          await host.loadSynthPlugin(handle.id, 'Surge XT');
+          if (t.fxp_path && typeof host.applySurgeFxpPreset === 'function') {
+            try {
+              await host.applySurgeFxpPreset(handle.id, t.fxp_path);
+            } catch (err) {
+              // Missing file on this machine: the track still exists with a
+              // default patch; snapshots remain meaningful relative moves.
+              console.warn('[TimbreGraph] preset restore failed', role, err);
+            }
+          }
+          t.track_id = handle.id;
+        }
+        await host.setProjectData?.(GRAPH_KEY, JSON.stringify(parsed));
+        setGraph(parsed);
+        setControl(0);
+        setStatus('');
+      } catch (err) {
+        setStatus(err instanceof Error ? err.message : 'Import failed');
+      }
+    },
+    [host],
+  );
+
+  const clearGraph = useCallback(async () => {
+    await host?.setProjectData?.(GRAPH_KEY, '');
+    setGraph(null);
+    setControl(0);
+  }, [host]);
+
   const toggleLink = useCallback(
     (role: Role) => {
       setLinked((prev) => {
@@ -214,16 +278,37 @@ export function TimbreGraphPanel({ host }: PluginUIProps) {
     return (
       <div style={{ padding: 12, fontSize: 12, lineHeight: 1.5 }}>
         <div style={{ fontWeight: 600, marginBottom: 6 }}>Timbre Graph</div>
-        <div style={{ opacity: 0.8 }}>
-          No morph graph loaded yet. Build one from six Surge patches with the
-          training lab:
+        <div style={{ opacity: 0.8, marginBottom: 10 }}>
+          No morph graph loaded yet. Build one with the training lab:
           <pre style={{ marginTop: 8, fontSize: 11, opacity: 0.9 }}>
             cd sas-timbre-graph/training{'\n'}
             tglab probe{'\n'}
             tglab morph --axis softer
           </pre>
-          then load the artifact into this panel.
         </div>
+        <label
+          style={{
+            display: 'inline-block', padding: '5px 10px', borderRadius: 4,
+            background: 'rgba(127,127,127,0.18)', cursor: 'pointer',
+          }}
+        >
+          Import morph graph…
+          <input
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importGraphFile(f);
+            }}
+          />
+        </label>
+        <div style={{ marginTop: 6, opacity: 0.6, fontSize: 11 }}>
+          e.g. training/workspace/morph-softer.json
+        </div>
+        {status && (
+          <div style={{ marginTop: 8, color: '#d66', fontSize: 11 }}>{status}</div>
+        )}
       </div>
     );
   }
@@ -236,6 +321,15 @@ export function TimbreGraphPanel({ host }: PluginUIProps) {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
         <span style={{ fontWeight: 600 }}>Timbre Graph</span>
         <span style={{ opacity: 0.6 }}>axis: {graph.axis.name}</span>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => void clearGraph()}
+          style={{ font: 'inherit', background: 'none', border: 'none',
+                   cursor: 'pointer', opacity: 0.55, fontSize: 11 }}
+        >
+          unload
+        </button>
       </div>
 
       {/* the dial */}
