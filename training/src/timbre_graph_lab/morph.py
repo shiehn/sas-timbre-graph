@@ -170,6 +170,102 @@ def build_morph_graph(
     }
 
 
+def build_xy_graph(
+    worker,
+    responses: dict,
+    paths: dict[str, str],
+    axis_x: str = "softer",
+    axis_y: str = "tighter",
+    n_points: int = 5,
+    budget: int = 20,
+    avg: int = 1,
+    seed: int = 1,
+) -> dict:
+    """A two-axis pad: solve each axis independently, then verify the SUM.
+
+    Two axes are refined separately and their parameter moves added, because
+    solving the 2-D target directly would need a fresh search per grid cell
+    (n_points squared) where this needs 2 x n_points. The catch is that adding
+    two moves is a linearity assumption of exactly the kind that failed in
+    C13b, so every summed corner is **re-rendered** and its achieved direction
+    recorded. `corner_cosine` in the output says how well the combination
+    actually held; low values mean prefer the single-axis dial for that patch.
+    """
+    from timbre_graph_lab.refine import make_surge_measure
+
+    gx = build_morph_graph(worker, responses, paths, axis_name=axis_x,
+                           n_points=n_points, budget=budget, avg=avg, seed=seed)
+    gy = build_morph_graph(worker, responses, paths, axis_name=axis_y,
+                           n_points=n_points, budget=budget, avg=avg, seed=seed)
+
+    controls = np.asarray(gx["control_points"], dtype=float)
+    roles: dict[str, dict] = {}
+    for role, tx in gx["roles"].items():
+        ty = gy["roles"].get(role)
+        if ty is None:
+            continue
+        base = np.asarray(tx["baseline"], dtype=float)
+        sx = np.asarray(tx["snapshots"], dtype=float) - base
+        sy = np.asarray(ty["snapshots"], dtype=float) - base
+        grid = [
+            [np.clip(base + sx[i] + sy[j], 0.0, 1.0).tolist()
+             for j in range(len(controls))]
+            for i in range(len(controls))
+        ]
+        roles[role] = {
+            **{k: tx[k] for k in ("role", "preset_id", "name", "param_names")},
+            "baseline": base.tolist(),
+            "grid": grid,
+            "declined": bool(tx["declined"] and ty["declined"]),
+        }
+
+    # verify the four extreme corners, where the summed move is largest
+    corners: dict[str, dict[str, float]] = {}
+    ax = AXES[axis_x] + AXES[axis_y]
+    ax = ax / (np.linalg.norm(ax) or 1.0)
+    for role, entry in roles.items():
+        resp = responses.get(role)
+        if resp is None or role not in paths or not worker.load_preset(paths[role]):
+            continue
+        measure = make_surge_measure(worker, resp, avg=avg)
+        got: dict[str, float] = {}
+        base = np.asarray(entry["baseline"], dtype=float)
+        for (i, j), label in (((0, 0), "--"), ((0, -1), "-+"),
+                              ((-1, 0), "+-"), ((-1, -1), "++")):
+            dx = np.asarray(entry["grid"][i][j], dtype=float) - base
+            z = measure(dx)
+            got[label] = round(float(score_move(z, ax)[1]), 3)
+        corners[role] = got
+    return {
+        "version": MORPH_VERSION,
+        "axes": {"x": {"name": axis_x, "vector": AXES[axis_x].tolist()},
+                 "y": {"name": axis_y, "vector": AXES[axis_y].tolist()}},
+        "feature_names": DESCRIPTOR_NAMES,
+        "control_points": [round(float(t), 4) for t in controls],
+        "roles": roles,
+        "corner_cosine": corners,
+        "quality": {"x": gx["quality"], "y": gy["quality"]},
+    }
+
+
+def params_at_xy(graph: dict, role: str, cx: float, cy: float) -> np.ndarray:
+    """Bilinear interpolation on the 2-D pad — the X/Y runtime."""
+    xs = np.asarray(graph["control_points"], dtype=float)
+    grid = np.asarray(graph["roles"][role]["grid"], dtype=float)
+
+    def frac(c: float) -> tuple[int, int, float]:
+        c = float(np.clip(c, xs[0], xs[-1]))
+        j = int(np.searchsorted(xs, c).clip(1, len(xs) - 1))
+        x0, x1 = xs[j - 1], xs[j]
+        return j - 1, j, (0.0 if x1 == x0 else (c - x0) / (x1 - x0))
+
+    i0, i1, wi = frac(cx)
+    j0, j1, wj = frac(cy)
+    top = grid[i0, j0] * (1 - wj) + grid[i0, j1] * wj
+    bot = grid[i1, j0] * (1 - wj) + grid[i1, j1] * wj
+    return top * (1 - wi) + bot * wi
+
+
 def quality(tracks: dict[str, RoleTrack], controls: np.ndarray) -> dict:
     """Is this dial usable: does it progress, stay continuous, and reach?
 

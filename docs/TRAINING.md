@@ -387,37 +387,48 @@ Shipped:
   **`defaultEnabled: false`** — the panel needs a morph artifact built offline,
   so opting in avoids a dead panel on first launch. sas-app typechecks clean.
 
-**⚠️ SDK gap — the panel cannot drive Surge yet.** Applying a snapshot needs a
-**by-name** parameter write, and the SDK exposes no per-parameter setter: only
-whole-state base64 (`setPluginState` / `setRawPluginState`). The engine *does*
-have `setPluginParameter(trackId, fxIndex, paramIndex, value)` — by **index**,
-not name — already used by `fx-tools.ts`. So the missing piece is one SDK
-method plus its host implementation, resolving names to indices:
-
-```ts
-setSynthParameters(trackId: string, params: Record<string, number>): Promise<void>
-```
-
-The panel declares it as an optional capability and degrades honestly (dial
-moves, status line explains the gap) rather than referencing an API that does
-not exist. Per the no-back-door rule, this must be added to
-`sas-plugin-sdk` + `plugin-host-impl.ts`, not worked around in the plugin.
+**SDK gap — CLOSED.** `host.setSynthParameters(trackId, params, pluginIndex?)`
+ships in **SDK 2.57.0**. The engine addresses parameters by index while callers
+hold names, and indices are not stable across plugin versions, so the host
+resolves names once against `listPluginParameters` and then writes each value.
+Unknown names **reject the whole call** rather than half-applying — a partially
+applied snapshot corresponds to no verified control position, which is worse
+than refusing. Implemented in `plugin-host-mixins/instrument.ts` behind
+`assertCapability('requiresSurgeXT')` + `assertOwned(trackId)`, mirrored in
+sas-app's in-tree types, `PLUGIN_SDK_VERSION` bumped to 2.57.0, and entered in
+`plugin-host-coverage-ledger.ts` (reason `plugin-runtime`) so the guard test
+passes. The panel still treats the method as optional so an older host degrades
+to a message instead of crashing.
 
 An alternative needing zero SDK change: have `tglab morph` capture Surge's
 **base64 state** at each control point and drive the panel through
 `setPluginState`. Rejected for now — a Surge state is ~50-200 KB, so nine
 points × six roles is ~10 MB per graph versus 44 KB today.
 
+### C13h — X/Y pad and cached achievability
+
+**Two-axis pad** (`build_xy_graph` / `params_at_xy`): the two axes are refined
+independently and their parameter moves summed, which costs 2 x n_points
+searches instead of n_points squared. Summing is a linearity assumption of
+exactly the kind that failed in C13b, so **every corner is re-rendered** and
+its achieved direction stored as `corner_cosine`. Measured on the six anchors
+(softer x tighter, 95 s): median corner cosine **+0.285**, best corners 0.66 to
+0.86 (kick ++ 0.86, pad -+ 0.71), but snare and lead go negative in places. So
+the pad is real and usable where `corner_cosine` is healthy, and the artifact
+says exactly where that is — prefer the single-axis dial elsewhere.
+
+**Cached achievability** (`achievability_cached`): a patch's reachable axes
+depend only on the patch, the probe and the policy — never on the other five
+anchors. Keyed on (preset_id, role, policy version, axis set) on disk, so
+re-picking a previously seen anchor is free instead of ~50 s.
+
 ### What to build next
 
-1. **SDK `setSynthParameters`** + host impl (the blocker above).
-2. Multi-axis dial (X/Y): two axes solved independently and summed, then
-   render-verified — the single-axis case is proven, this is the extension.
-3. Cheaper achievability: 5.6 s per (role, axis) pair, so 3 shared axes across
-   6 roles is ~100 s serial / ~20 s parallel — worth caching per preset.
-4. Kick-specific axis set is already covered by `tighter`/`punchier`/`boomier`;
-   a second graph on `tighter` measured median endpoint cosine **0.792**
-   (higher than `softer`, though fewer directions live).
+1. Panel UI for the X/Y pad (single-axis dial ships now).
+2. Surface `corner_cosine` in the panel so weak corners visibly soften.
+3. Kick already has good axes via `tighter`/`punchier`/`boomier`; a `tighter`
+   graph measured median endpoint cosine **0.792**, higher than `softer` though
+   with fewer live directions — worth offering axis choice in the UI.
 
 Semantic axes are defined in descriptor space (brighter / fuller / snappier /
 longer / rougher) — interpretable, role-agnostic to state, role-specific to

@@ -21,19 +21,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PluginUIProps } from '@signalsandsorcery/plugin-sdk';
 
 /**
- * Applying a snapshot needs a by-name parameter write, which the SDK does not
- * expose yet: it offers whole-state base64 (`setPluginState`) and the engine
- * has `setPluginParameter(trackId, fxIndex, paramIndex, value)` by INDEX only.
- * Declared as an optional capability so this panel compiles and degrades
- * honestly against today's SDK instead of pretending the method exists.
- * See docs/TRAINING.md "SDK gap" for the intended addition.
+ * Snapshots are applied through `host.setSynthParameters` (SDK 2.57.0), which
+ * writes several synth parameters BY NAME in one call. It stays optional in the
+ * SDK surface, so an older host degrades to a clear message rather than a
+ * crash — and rather than a half-applied patch, which would correspond to no
+ * verified control position at all.
  */
-type ParamWriter = {
-  setSynthParameters?: (
-    trackRole: string,
-    params: Record<string, number>,
-  ) => Promise<void>;
-};
 
 const ROLES = ['kick', 'snare', 'hat', 'bass', 'pad', 'lead'] as const;
 type Role = (typeof ROLES)[number];
@@ -57,6 +50,8 @@ interface MorphGraph {
     {
       role: string;
       preset_id: string;
+      /** Engine/DB track id. Track identity is never a display name. */
+      track_id?: string;
       name: string;
       param_names: string[];
       baseline: number[];
@@ -175,14 +170,11 @@ export function TimbreGraphPanel({ host }: PluginUIProps) {
           t.param_names.forEach((name, i) => {
             params[name] = values[i];
           });
-          const writer = host as unknown as ParamWriter;
-          if (typeof writer.setSynthParameters !== 'function') {
-            setStatus(
-              'Dial moves, but this SDK cannot write synth parameters by name yet — see docs/TRAINING.md (SDK gap).',
-            );
+          if (typeof host.setSynthParameters !== 'function') {
+            setStatus('This host predates SDK 2.57.0 — synth parameter writes unavailable.');
             return;
           }
-          await writer.setSynthParameters(role, params);
+          await host.setSynthParameters(t.track_id ?? role, params);
         }
         setStatus('');
       } catch (err) {

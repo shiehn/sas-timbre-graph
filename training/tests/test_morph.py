@@ -160,3 +160,68 @@ def test_dial_centre_is_the_untouched_patch():
     g = _graph()
     base = np.asarray(g["roles"]["pad"]["baseline"])
     np.testing.assert_allclose(params_at(g, "pad", 0.0), base, atol=1e-12)
+
+
+# --- X/Y pad ----------------------------------------------------------------
+
+def _xy_graph(n=3):
+    """Two-axis grid: role moves +0.1 per x step and +0.01 per y step."""
+    base = np.full(4, 0.5)
+    xs = list(np.linspace(-1, 1, n))
+    grid = [
+        [(base + 0.1 * xs[i] + 0.01 * xs[j]).tolist() for j in range(n)]
+        for i in range(n)
+    ]
+    return {
+        "version": MORPH_VERSION,
+        "axes": {"x": {"name": "softer", "vector": []},
+                 "y": {"name": "tighter", "vector": []}},
+        "control_points": [float(x) for x in xs],
+        "roles": {"pad": {"role": "pad", "preset_id": "p", "name": "pad",
+                          "param_names": [f"p{i}" for i in range(4)],
+                          "baseline": base.tolist(), "grid": grid,
+                          "declined": False}},
+        "corner_cosine": {"pad": {"--": 0.7, "-+": 0.6, "+-": 0.6, "++": 0.5}},
+    }
+
+
+def test_xy_interpolation_is_exact_at_grid_nodes():
+    from timbre_graph_lab.morph import params_at_xy
+    g = _xy_graph()
+    xs = g["control_points"]
+    for i, cx in enumerate(xs):
+        for j, cy in enumerate(xs):
+            np.testing.assert_allclose(
+                params_at_xy(g, "pad", cx, cy),
+                np.asarray(g["roles"]["pad"]["grid"][i][j]), atol=1e-12)
+
+
+def test_xy_centre_is_the_untouched_patch():
+    from timbre_graph_lab.morph import params_at_xy
+    g = _xy_graph()
+    base = np.asarray(g["roles"]["pad"]["baseline"])
+    np.testing.assert_allclose(params_at_xy(g, "pad", 0.0, 0.0), base, atol=1e-12)
+
+
+def test_xy_is_bilinear_between_nodes():
+    from timbre_graph_lab.morph import params_at_xy
+    g = _xy_graph()
+    xs = g["control_points"]
+    mx, my = (xs[0] + xs[1]) / 2, (xs[0] + xs[1]) / 2
+    grid = np.asarray(g["roles"]["pad"]["grid"])
+    expect = (grid[0, 0] + grid[0, 1] + grid[1, 0] + grid[1, 1]) / 4
+    np.testing.assert_allclose(params_at_xy(g, "pad", mx, my), expect, atol=1e-12)
+
+
+def test_xy_clamps_outside_the_pad():
+    from timbre_graph_lab.morph import params_at_xy
+    g = _xy_graph()
+    grid = np.asarray(g["roles"]["pad"]["grid"])
+    np.testing.assert_allclose(params_at_xy(g, "pad", -9, -9), grid[0, 0], atol=1e-12)
+    np.testing.assert_allclose(params_at_xy(g, "pad", 9, 9), grid[-1, -1], atol=1e-12)
+
+
+def test_xy_corner_cosine_is_reported_for_the_summed_move():
+    """Summing two axes assumes linearity, so corners must be re-verified."""
+    g = _xy_graph()
+    assert set(g["corner_cosine"]["pad"]) == {"--", "-+", "+-", "++"}

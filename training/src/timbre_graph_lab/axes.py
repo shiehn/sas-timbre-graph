@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from timbre_graph_lab.config import POLICY_VERSION
 from timbre_graph_lab.descriptors import DESCRIPTOR_NAMES
 from timbre_graph_lab.solver import unit
 
@@ -106,3 +107,46 @@ def shared_axes(tables: dict[str, dict[str, float]]) -> list[tuple[str, int, flo
         if vals:
             rows.append((name, len(vals), round(float(np.median(vals)), 4)))
     return sorted(rows, key=lambda r: (-r[1], -r[2]))
+
+
+def _cache_path(cfg) -> "Path":
+    from pathlib import Path
+
+    return Path(cfg.workspace) / "achievability_cache.json"
+
+
+def achievability_cached(
+    measure,
+    response,
+    cfg,
+    budget: int = 60,
+    axes: dict[str, np.ndarray] | None = None,
+    seed: int = 1,
+) -> dict[str, float]:
+    """`achievability` memoised per preset on disk.
+
+    Probing costs ~5.6 s per (role, axis) pair, so a six-anchor set against the
+    full library is minutes — but a preset's reachable axes depend only on the
+    patch, the probe and the policy, never on the other five anchors. Keying on
+    (preset_id, role, policy version, axis set) makes re-picking a previously
+    seen anchor free.
+    """
+    import hashlib
+    import json
+
+    axes = axes or AXES
+    tag = hashlib.sha1(
+        "|".join(sorted(axes)).encode() + str(budget).encode()
+    ).hexdigest()[:8]
+    key = f"{response.preset_id or response.name}/{response.role}/{POLICY_VERSION}/{tag}"
+
+    path = _cache_path(cfg)
+    cache = json.loads(path.read_text()) if path.exists() else {}
+    if key in cache:
+        return cache[key]
+
+    table = achievability(measure, response, budget=budget, axes=axes, seed=seed)
+    cache[key] = table
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=1, sort_keys=True))
+    return table

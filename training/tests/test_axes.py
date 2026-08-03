@@ -108,3 +108,50 @@ def test_shared_axes_ranks_by_coverage_then_strength():
     names = {n: (c, m) for n, c, m in ranked}
     assert names["soft"][0] == 3
     assert names["bright"][0] == 1        # only the pad can express it
+
+
+# --- cached achievability ---------------------------------------------------
+
+def test_achievability_cache_avoids_reprobing_the_same_preset(tmp_path):
+    """Probing costs ~5.6 s per (role, axis); a patch's reachable axes depend
+    only on the patch, so re-picking a seen anchor must be free."""
+    from dataclasses import dataclass
+
+    from timbre_graph_lab.axes import achievability_cached
+    from timbre_graph_lab.config import LabConfig
+
+    r = _resp(seed=5)
+    r.preset_id = "abc123"
+    cfg = LabConfig(workspace=tmp_path)
+    calls = {"n": 0}
+
+    def measure(dx):
+        calls["n"] += 1
+        return r.J.T @ dx
+
+    first = achievability_cached(measure, r, cfg, budget=8)
+    after_first = calls["n"]
+    assert after_first > 0
+
+    second = achievability_cached(measure, r, cfg, budget=8)
+    assert second == first
+    assert calls["n"] == after_first          # nothing re-rendered
+    assert (tmp_path / "achievability_cache.json").exists()
+
+
+def test_achievability_cache_key_separates_roles(tmp_path):
+    from timbre_graph_lab.axes import achievability_cached
+    from timbre_graph_lab.config import LabConfig
+
+    cfg = LabConfig(workspace=tmp_path)
+    a = _resp(seed=6); a.preset_id = "same"; a.role = "bass"
+    b = _resp(seed=7); b.preset_id = "same"; b.role = "lead"
+    achievability_cached(lambda dx: a.J.T @ dx, a, cfg, budget=6)
+    calls = {"n": 0}
+
+    def measure(dx):
+        calls["n"] += 1
+        return b.J.T @ dx
+
+    achievability_cached(measure, b, cfg, budget=6)
+    assert calls["n"] > 0                     # a different role must re-probe
