@@ -1,7 +1,7 @@
 {
   "name": "@signalsandsorcery/timbre-graph",
   "version": "0.1.0",
-  "description": "Timbre Graph — six coordinated Surge XT tracks morphed together through one perceptual control surface. Panel is a stub; the trained motion model lives in training/.",
+  "description": "Timbre Graph \u2014 six coordinated Surge XT tracks morphed together through one perceptual control surface. Panel is a stub; the trained motion model lives in training/.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -17,6 +17,7 @@
     "dist",
     "plugin.json",
     "icon.svg",
+    "assets",
     "README.md",
     "LICENSE"
   ],

@@ -9,4 +9,6 @@ export default defineConfig({
   // Provided by the host at runtime — never bundle these into the plugin.
   external: ['react', 'react-dom', '@signalsandsorcery/plugin-sdk'],
   treeshake: true,
+  // bundle the shipped morph graph into dist
+  loader: { '.json': 'json' },
 });

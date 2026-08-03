@@ -117,13 +117,14 @@ describe('TimbreGraphPanel rendering', () => {
     };
   }
 
-  it('explains how to build a graph when none is loaded', () => {
+  it('ships with a graph: the dial is live with no import', () => {
     const { container, cleanup } = render(
       createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
-    expect(container.textContent).toContain('Add Graph');
-    expect(container.textContent).toContain('Generate All');
-    expect(container.textContent).toContain('tglab morph');
+    // the shipped graph means a dial, not a "go run a Python CLI" message
+    expect(container.querySelector('input[type="range"]')).not.toBeNull();
+    expect(container.textContent).toContain('axis:');
+    expect(container.textContent).not.toContain('tglab');
     cleanup();
   });
 
@@ -190,11 +191,11 @@ describe('TimbreGraphPanel import flow', () => {
     };
   }
 
-  it('offers an import affordance in the empty state', () => {
+  it('keeps import as a secondary affordance for re-training', () => {
     const { container, cleanup } = render(
       createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
-    expect(container.textContent).toContain('Import morph graph');
+    expect(container.textContent).toContain('import');
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
     cleanup();
   });
@@ -563,5 +564,40 @@ describe('gesture normalization makes every role audible', () => {
 
   it('handles an all-zero (declined) role without dividing by zero', () => {
     expect(normalize([0, 0, 0], 0.5, 1)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('the plugin ships with a usable graph', () => {
+  const { BUNDLED_GRAPH } = require('../src/bundled-graph');
+
+  it('covers all six roles with render-verified snapshots', () => {
+    for (const role of ['kick', 'snare', 'hat', 'bass', 'pad', 'lead']) {
+      const t = BUNDLED_GRAPH.roles[role];
+      expect(t).toBeDefined();
+      expect(t.param_names.length).toBeGreaterThan(0);
+      expect(t.snapshots.length).toBe(BUNDLED_GRAPH.control_points.length);
+      expect(t.snapshots[0].length).toBe(t.param_names.length);
+    }
+  });
+
+  it('references anchor presets by PORTABLE relative path', () => {
+    // an absolute authoring-machine path would not exist on any other machine
+    for (const role of Object.keys(BUNDLED_GRAPH.roles)) {
+      const fxp = BUNDLED_GRAPH.roles[role].fxp_path;
+      expect(fxp).toBeTruthy();
+      expect(fxp.startsWith('/')).toBe(false);
+      expect(fxp).toMatch(/\.fxp$/);
+    }
+  });
+
+  it('carries no machine- or project-specific state', () => {
+    for (const role of Object.keys(BUNDLED_GRAPH.roles)) {
+      // engine track ids belong to a project, never to a shipped artifact
+      expect(BUNDLED_GRAPH.roles[role].track_id).toBeUndefined();
+    }
+  });
+
+  it('has a centre control point so the dial has a true no-op', () => {
+    expect(BUNDLED_GRAPH.control_points).toContain(0);
   });
 });

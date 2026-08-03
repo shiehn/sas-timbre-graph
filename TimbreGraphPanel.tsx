@@ -25,6 +25,7 @@ import type {
 } from '@signalsandsorcery/plugin-sdk';
 import {
   GeneratorPanelShell,
+  parseTrackGroups,
   useGeneratorPanelCore,
 } from '@signalsandsorcery/plugin-sdk';
 import { createTimbreGraphAdapter } from './src/timbre-graph-adapter';
@@ -34,7 +35,12 @@ import {
   toTimbreRole,
   type TimbreRole,
 } from './src/role-patterns';
-import { TIMBRE_GROUP_META_KEY } from './src/timbre-group-meta';
+import {
+  TIMBRE_GROUP_META_KEY,
+  timbreGroupSpec,
+  type TimbreGroupMeta,
+} from './src/timbre-group-meta';
+import { BUNDLED_GRAPH } from './src/bundled-graph';
 
 const ROLE_LABELS: Record<TimbreRole, string> = {
   kick: 'Kick',
@@ -131,7 +137,13 @@ export function MorphSection({
   resolveTrackIds: (role: string) => string[];
   onTracksChanged: () => void;
 }) {
-  const [graph, setGraph] = useState<MorphGraph | null>(null);
+  // The plugin SHIPS with a measured graph; a project-stored one (from an
+  // import) overrides it. The dial is therefore live on first open — the
+  // training lab is for re-training, not a user prerequisite.
+  const [graph, setGraph] = useState<MorphGraph | null>(
+    BUNDLED_GRAPH as unknown as MorphGraph,
+  );
+  const [imported, setImported] = useState(false);
   const [control, setControl] = useState(0);
   /**
    * Gesture strength as a TARGET maximum parameter move, not a multiplier.
@@ -160,7 +172,11 @@ export function MorphSection({
       try {
         const raw = await host.getProjectData?.<unknown>(GRAPH_KEY);
         if (!cancelled && raw) {
-          setGraph(typeof raw === 'string' ? JSON.parse(raw) : (raw as MorphGraph));
+          const stored = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (stored && (stored as MorphGraph).roles) {
+            setGraph(stored as MorphGraph);
+            setImported(true);
+          }
         }
         const links = await host.getProjectData?.<unknown>(LINKS_KEY);
         if (!cancelled && links) {
@@ -250,9 +266,11 @@ export function MorphSection({
     [host, activeSceneId, onTracksChanged],
   );
 
-  const clearGraph = useCallback(async () => {
+  /** Drop an imported graph and fall back to the shipped one. */
+  const revertToBundled = useCallback(async () => {
     await host.setProjectData?.(GRAPH_KEY, '');
-    setGraph(null);
+    setGraph(BUNDLED_GRAPH as unknown as MorphGraph);
+    setImported(false);
     setControl(0);
   }, [host]);
 
@@ -350,12 +368,9 @@ export function MorphSection({
         style={{ padding: '10px 12px', fontSize: 12, lineHeight: 1.5 }}
       >
         <div style={{ opacity: 0.8, marginBottom: 8 }}>
-          <b>Add Graph</b> creates the six-track group (kick, snare, hat,
-          bass, pad, lead) — then <b>Generate All</b> on the group to hear
-          it. To enable the morph dial, import a graph built by the training
-          lab (<code>tglab probe</code>, then{' '}
-          <code>tglab morph --axis softer</code>) — importing also sets up the
-          tracks with their measured anchor presets.
+          <b>Add Graph</b> creates the six-track group (kick, snare, hat, bass,
+          pad, lead) on the shipped anchor patches — then <b>Generate All</b>{' '}
+          to hear it, and sweep the dial to morph all six together.
         </div>
         <label
           style={{
@@ -424,14 +439,32 @@ export function MorphSection({
             <option value={1}>max</option>
           </select>
         </label>
-        <button
-          type="button"
-          onClick={() => void clearGraph()}
-          style={{ font: 'inherit', background: 'none', border: 'none',
-                   cursor: 'pointer', opacity: 0.55, fontSize: 11 }}
+        {imported && (
+          <button
+            type="button"
+            onClick={() => void revertToBundled()}
+            title="Discard the imported graph and use the one shipped with the plugin"
+            style={{ font: 'inherit', background: 'none', border: 'none',
+                     cursor: 'pointer', opacity: 0.55, fontSize: 11 }}
+          >
+            use shipped
+          </button>
+        )}
+        <label
+          title="Advanced: load a graph produced by the training lab"
+          style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }}
         >
-          unload
-        </button>
+          import…
+          <input
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importGraphFile(f);
+            }}
+          />
+        </label>
       </div>
 
       <input
@@ -515,13 +548,55 @@ export function TimbreGraphPanel(props: PluginUIProps) {
   // memo) stays referentially stable while always reading current tracks.
   const tracksRef = useRef(core.tracks);
   tracksRef.current = core.tracks;
+  /**
+   * Engine ids of the tracks the dial may drive for a role.
+   *
+   * Scoped to members of a timbre GROUP, never "any owned track whose role
+   * matches". panel-core's adoptSceneTracks claims unowned tracks of this
+   * plugin's generator type, so a pre-existing synth/lead track in the scene
+   * becomes visible here — and the dial was writing Surge morph values into
+   * other panels' tracks (observed live on track 1083).
+   */
+  const groupMemberIdsRef = useRef<Set<string>>(new Set());
   const resolveTrackIds = useCallback((role: string): string[] => {
     const want = toTimbreRole(role);
+    const members = groupMemberIdsRef.current;
     return tracksRef.current
+      .filter((t) => members.has(t.handle.id))
       .filter((t) => toTimbreRole(t.role) === want
         || toTimbreRole(t.handle.role) === want)
       .map((t) => t.handle.id);
   }, []);
+
+  // Group membership comes from the scene-data meta the core has resolved.
+  // Kept in a ref so the resolver stays referentially stable.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const sceneId = props.activeSceneId;
+      if (!sceneId) {
+        groupMemberIdsRef.current = new Set();
+        return;
+      }
+      try {
+        const sceneData = await props.host.getAllSceneData(sceneId);
+        const groups = parseTrackGroups<TimbreGroupMeta>(sceneData, timbreGroupSpec);
+        const memberDbIds = new Set(
+          groups.flatMap((g) => g.members.map((m) => m.dbId)),
+        );
+        if (cancelled) return;
+        groupMemberIdsRef.current = new Set(
+          tracksRef.current
+            .filter((t) => memberDbIds.has(t.handle.dbId))
+            .map((t) => t.handle.id),
+        );
+      } catch {
+        groupMemberIdsRef.current = new Set();
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.activeSceneId, props.host, core.tracks]);
 
   const slots = useMemo(
     () => ({

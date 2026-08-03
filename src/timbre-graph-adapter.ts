@@ -37,6 +37,7 @@ import {
 } from './timbre-group-meta';
 import { TimbreGroupRow } from './TimbreGroupRow';
 import type { TimbreGroupMeta } from './timbre-group-meta';
+import { BUNDLED_GRAPH } from './bundled-graph';
 
 const ACCENT = '#2DD4BF'; // teal — distinct from synth violet / bass amber
 
@@ -92,12 +93,31 @@ export function createTimbreGraphAdapter(
       ctx: TrackCreatedContext,
     ): Promise<void> {
       const groupId = handle.dbId;
+
+      /**
+       * Restore the shipped graph's measured anchor patch for a role, so the
+       * group starts on the exact sounds the morph was verified against.
+       * Non-fatal: a machine without that library patch keeps the default
+       * Surge sound and the morph still applies as relative moves.
+       */
+      const applyAnchor = async (trackId: string, role: string): Promise<void> => {
+        const fxp = BUNDLED_GRAPH.roles[role]?.fxp_path;
+        if (!fxp || typeof host.applySurgeFxpPreset !== 'function') return;
+        try {
+          await host.applySurgeFxpPreset(trackId, fxp);
+        } catch {
+          /* library patch absent on this machine — keep the default patch */
+        }
+      };
+
       await host.setTrackRole(handle.id, APP_ROLE_TOKENS.kick);
       await host.setSceneData(
         ctx.activeSceneId,
         ctx.trackDataKey(handle.dbId, TIMBRE_GROUP_META_KEY),
         { groupId, memberIndex: 0, role: 'kick' },
       );
+      await applyAnchor(handle.id, 'kick');
+
       for (let i = 1; i < TIMBRE_ROLES.length; i++) {
         const role = TIMBRE_ROLES[i];
         const sibling = await host.createTrack({
@@ -111,6 +131,7 @@ export function createTimbreGraphAdapter(
           ctx.trackDataKey(sibling.dbId, TIMBRE_GROUP_META_KEY),
           { groupId, memberIndex: i, role },
         );
+        await applyAnchor(sibling.id, role);
       }
     },
 

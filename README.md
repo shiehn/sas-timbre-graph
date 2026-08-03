@@ -37,9 +37,16 @@ At runtime the panel does one thing: **interpolate between two verified snapshot
 
 There is also a **two-axis pad**: two axes solved independently and combined, with each corner re-rendered so the file records how well the combination held for each patch.
 
-## Building a morph graph
+## Re-training the graph (optional)
 
-The plugin consumes an artifact produced by the training lab in [`training/`](training/):
+**The plugin ships with a measured morph graph** — the dial works out of the
+box, and *Add Graph* sets the six tracks to the anchor patches it was measured
+against (referenced by path relative to your installed Surge library, so they
+resolve on any machine).
+
+The training lab in [`training/`](training/) exists to produce a *new* graph —
+different anchors, a different axis, more measurement depth — which is then
+shipped as `assets/morph-*.json` in a plugin release. End users never need it:
 
 ```bash
 cd training
@@ -52,7 +59,9 @@ uv venv --python 3.11 .venv && uv pip install -e ".[dev]" --python .venv/bin/pyt
 .venv/bin/tglab morph --axis softer
 ```
 
-Full reference, including the measurement conventions and quality gates: [`docs/TRAINING.md`](docs/TRAINING.md).
+The panel's `import…` affordance loads such a graph for testing before it is
+shipped. Full reference, including measurement conventions and quality gates:
+[`docs/TRAINING.md`](docs/TRAINING.md).
 
 ## Install
 
@@ -64,7 +73,7 @@ https://github.com/shiehn/sas-timbre-graph
 
 Or clone manually into `~/.signals-and-sorcery/plugins/@signalsandsorcery/timbre-graph/`.
 
-Ships **disabled by default** — the panel needs a morph graph, so enable it once you have built one.
+Ships with a measured morph graph, so the dial works immediately after install.
 
 ## Capabilities
 

@@ -31,11 +31,33 @@ from pathlib import Path
 import numpy as np
 
 from timbre_graph_lab.axes import AXES, MIN_ACHIEVABLE_COSINE
+from timbre_graph_lab.config import LabConfig
 from timbre_graph_lab.descriptors import DESCRIPTOR_NAMES
 from timbre_graph_lab.refine import refine, score_move
 from timbre_graph_lab.solver import MAX_PARAM_STEP, TRUST_RADIUS
 
 MORPH_VERSION = "morph-graph-v1"
+
+
+def portable_fxp_path(abs_path: str, cfg: LabConfig | None = None) -> str:
+    """An anchor path a SHIPPED artifact can use on someone else's machine.
+
+    Absolute paths are authoring-machine specific; Surge's library also lives
+    in different places per platform. Returned relative to whichever installed
+    content root contains it (e.g. "Percussion/Kick 909ish.fxp"), which the
+    host resolves against the local roots. Falls back to the absolute path when
+    the anchor is not inside a known root.
+    """
+    from pathlib import Path
+
+    cfg = cfg or LabConfig()
+    p = Path(abs_path)
+    for root in (cfg.factory_patches_dir, cfg.third_party_patches_dir):
+        try:
+            return str(p.relative_to(root))
+        except ValueError:
+            continue
+    return str(p)
 
 
 @dataclass
@@ -160,7 +182,7 @@ def build_morph_graph(
         )
         tracks[role] = RoleTrack(
             role=role, preset_id=resp.preset_id, name=resp.name,
-            fxp_path=str(paths[role]),
+            fxp_path=portable_fxp_path(str(paths[role])),
             param_names=list(resp.param_names), baseline=resp.baseline.copy(),
             snapshots=snaps, cosine=cos, projection=proj,
         )
