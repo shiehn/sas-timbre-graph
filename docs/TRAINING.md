@@ -90,6 +90,82 @@ Lesson worth keeping: a QC threshold copied from fixed-point audio intuition
 (0 dBFS = ceiling) is wrong in a float pipeline. Verify what a gate rejects
 before trusting its rejection rate.
 
+## C12 — PROBE, DON'T PREDICT (decisive result, 2026-08-03)
+
+**The learned cross-preset forward proxy is unnecessary. Measure the six
+anchors the user actually chose instead.** This supersedes the model-centric
+parts of the proposal (§3, §5, §6) and is the single most important finding
+of the build.
+
+### What was measured
+
+Full corpus: 2,145 anchors → 2,111 shards → 775,654 training rows (42× the
+pilot). The role-conditioned FiLM MLP trained to a low training loss (0.485 →
+0.070) and **still lost to a linear ridge baseline** on held-out presets:
+delta-cosine **0.101 vs 0.113**. More data did not help: the pilot's 50
+shards gave 0.027, and 42× more gave 0.101 — both ≈ 0.
+
+Hypothesis at the time: anchors perturbed near-disjoint parameter subsets
+(228/350 params never perturbed by any anchor; same-role Jaccard **0.205**),
+so columns did not align across presets. Two bugs were fixed — switch
+parameters were removed from the continuous allow-list (350 nominal → 97
+genuinely continuous, via a behavioural probe) and a shared 34-parameter core
+set was perturbed on every anchor — and a fresh 219-shard pilot was
+generated. Column alignment improved exactly as intended, **Jaccard 0.205 →
+0.732**. Cross-preset transfer did not move at all:
+
+| | v1 | v2 (aligned columns) |
+|---|---|---|
+| Jaccard support overlap | 0.205 | **0.732** |
+| Nearest-anchor transfer | 0.078 | **0.071** |
+| Global ridge | 0.120 | 0.111 |
+
+So the disjoint-support hypothesis was **wrong**. Every transfer strategy
+tested on the full corpus (249 held-out presets) plateaus in the same place,
+while probing the anchor itself is ~4× better:
+
+| Strategy | delta-cosine |
+|---|---|
+| **probe the actual anchor (oracle)** | **+0.534** |
+| nearest neighbour by descriptors | +0.075 |
+| nearest neighbour by parameters | +0.091 |
+| mean of 16 nearest | +0.144 |
+| population-mean Jacobian | +0.138 |
+| single global ridge | +0.135 |
+
+Note that *averaging beats nearest-neighbour*. That is the signature of
+idiosyncratic local behaviour: no individual similar patch predicts another,
+so the population mean is the best any predictor can do — and it caps at
+~0.14. A preset's local parameter→timbre Jacobian is simply not a function of
+anything cheap we can observe about it.
+
+### Why this is good news
+
+The instrument never needed prediction. Rendering is ~100× real-time, so the
+true local response of six *specific* chosen patches can be **measured** in
+seconds:
+
+- central finite differences over the 34-parameter core, averaged ×3 for
+  noise ≈ 200–280 renders per anchor ≈ **4–8 s**
+- six anchors ≈ **30–50 s serial, ~10 s across six processes**
+
+That buys **0.534 instead of 0.135** — four times the accuracy — with no
+model, no training pipeline, no dataset versioning, no generalization risk,
+and no ONNX in the plugin. The morph graph is built from measured Jacobians
+at anchor-selection time, exactly the C6 runtime that was already the plan.
+
+### Consequences
+
+- **Drop** the forward/delta model from the critical path (proposal Phases
+  4–7). Keep the corpus + shards as a benchmark for future research.
+- **Keep** everything that made measurement trustworthy: frozen-phase
+  determinism (C0), the corrected QC gate (C0b), the probed parameter policy,
+  the descriptor basis, and the per-anchor sensitivity screen.
+- **Build next**: an on-demand anchor prober (measure 6 anchors → response
+  matrices → morph graph), which is a small, deterministic component.
+- A learned proxy only becomes interesting if instant graph-building matters
+  more than accuracy, and the ceiling above says it would be a downgrade.
+
 ## Challenges / amendments to the proposal
 
 **C1 — Rendering is not the bottleneck; drop the render-farm plan.**
