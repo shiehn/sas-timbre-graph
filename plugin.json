@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Six coordinated Surge XT tracks (Kick, Snare, Hat, Bass, Chord Pad, Lead) morphed together through one perceptual control surface. Move one point; all six patches move in a musically coherent direction. Any track can be unlinked to freeze or hand-tweak it while the other five keep morphing.",
   "generatorType": "midi",
+  "supportedTimeSignatures": "*",
   "main": "dist/index.js",
   "author": "Steve Hiehn",
   "icon": "icon.svg",
