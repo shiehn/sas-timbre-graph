@@ -166,6 +166,76 @@ at anchor-selection time, exactly the C6 runtime that was already the plan.
 - A learned proxy only becomes interesting if instant graph-building matters
   more than accuracy, and the ceiling above says it would be a downgrade.
 
+## C13 — Coupling: measured reality (2026-08-03)
+
+The prober, solver and render-verifier are built (`prober.py`, `solver.py`,
+`verify.py`, `tglab probe` / `tglab verify`). Probing six anchors takes **98 s
+serial, ~25 s across six processes** and yields 8–26 live parameters per
+anchor out of a 34-parameter core. What the render-verification then measured
+changes the design in three ways.
+
+### C13a — Descriptors MUST be standardized (another scale bug)
+
+First verification looked triumphant: coupled 0.619 vs knob-copy −0.084. It
+was an illusion. Raw descriptors span wildly different units, and measured
+over the corpus **`rolloff85_mean` + `bandwidth_mean` alone carry 85% of all
+delta energy** while 15 of 20 descriptors contribute ~0%. Every cosine — and
+every solver target — was effectively "spectral rolloff" and nothing else.
+
+`FEATURE_SCALE` (per-descriptor corpus std, baked into `descriptors.py` so the
+runtime needs no corpus) now standardizes the space. Honest result after the
+fix: coupled **0.057** vs copy 0.022. The same class of mistake as the QC gate
+(C0b): *a unit assumption nobody checked*. Third time this project has been
+bitten by one — check the scale before trusting any metric.
+
+### C13b — Open-loop prediction is too weak; search instead
+
+The Jacobian is linear and measured one parameter at a time, but Surge's
+controls interact multiplicatively, so a combined solved move does not produce
+the predicted sum. Since a render costs ~30 ms, the fix is to stop predicting:
+seed from the Jacobian solve, then refine against **real renders**.
+
+| | median achieved-vs-requested cosine |
+|---|---|
+| open-loop (Jacobian solve) | +0.048 |
+| **closed-loop (+24 renders)** | **+0.186** |
+
+Improved in **92%** of cases for 25 renders per target — under a second. This
+is C12's lesson taken one step further: don't predict, *measure*, and keep
+measuring inside the loop.
+
+### C13c — Roles couple on DIFFERENT axes (the real coupling policy)
+
+Percussion does not couple like melody, and that is physics rather than a bug:
+a short low thump has a tiny reachable timbre space. Measured per semantic
+axis (render-verified):
+
+| | kick | snare | hat | bass | pad | lead |
+|---|---|---|---|---|---|---|
+| brighter | 0.02 | 0.01 | 0.26 | 0.11 | 0.41 | **0.46** |
+| fuller | 0.05 | 0.09 | 0.07 | 0.29 | **0.50** | 0.37 |
+| longer | −0.14 | **0.93** | **0.69** | 0.05 | −0.46 | 0.40 |
+| snappier | −0.19 | 0.15 | 0.08 | 0.26 | 0.23 | −0.59 |
+
+Asking a snare to get "brighter" achieves 0.01; asking it to get "longer"
+achieves **0.93**. So the coupling policy is not a 6×6 scalar matrix (proposal
+§3.1) but a **(role × axis) matrix**, and it can be *measured per anchor*
+rather than hand-tuned: probe which axes an anchor can actually express, then
+drive each role along its own best axis. One dial, six coherent moves, each in
+the vocabulary its synth actually has.
+
+### What to build next
+
+1. **Closed-loop refiner** (~25 renders per target) as the graph-builder core.
+2. **Per-anchor axis achievability** at probe time → fills the coupling matrix
+   from measurement instead of taste.
+3. Then the morph-graph artifact + panel wiring.
+
+Semantic axes are defined in descriptor space (brighter / fuller / snappier /
+longer / rougher) — interpretable, role-agnostic to state, role-specific to
+realize. That is the honest version of "an unlabeled dial that morphs through
+convincing configurations".
+
 ## Challenges / amendments to the proposal
 
 **C1 — Rendering is not the bottleneck; drop the render-farm plan.**

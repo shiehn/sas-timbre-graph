@@ -40,6 +40,48 @@ DESCRIPTOR_NAMES = [
 
 N_DESCRIPTORS = len(DESCRIPTOR_NAMES)
 
+# Per-descriptor scale for comparing timbre CHANGES.
+#
+# The raw descriptors live in wildly different units — rolloff and bandwidth
+# in Hz (thousands), band fractions in [0,1], loudness in dB — so any distance
+# or cosine taken on raw vectors is decided almost entirely by the Hz-scale
+# dimensions. Measured over the full corpus: rolloff85_mean and
+# bandwidth_mean alone carried 85% of all delta energy while 15 of the 20
+# descriptors contributed ~0%. A solver working in that space is optimising
+# spectral rolloff and ignoring band balance, envelope shape and loudness
+# entirely, which produced erratic and even anti-correlated coupling.
+#
+# These are the per-dimension standard deviations across the v1 corpus
+# (2,111 anchors / 775,654 observations), baked in as constants so the runtime
+# never needs the corpus to interpret a timbre delta.
+FEATURE_SCALE = np.array([
+    13.96067,      # loud_rms_db
+    12.72466,      # loud_peak_db
+    4.86431,       # crest_db
+    1554.48010,    # centroid_mean
+    1077.25525,    # centroid_std
+    1283.77832,    # bandwidth_mean
+    2823.85596,    # rolloff85_mean
+    0.18004,       # flatness_mean
+    0.05579,       # zcr_mean
+    0.21499,       # band_sub
+    0.34542,       # band_low
+    0.35641,       # band_lowmid
+    0.19408,       # band_mid
+    0.07176,       # band_high
+    0.06303,       # band_air
+    0.59352,       # attack_time
+    26.42802,      # decay_slope
+    0.23731,       # env_sparsity
+    0.40359,       # env_flux
+    6.13604,       # contrast_mean
+], dtype=np.float64)
+
+
+def standardize(z: np.ndarray) -> np.ndarray:
+    """Put a descriptor vector (or delta) into comparable per-dimension units."""
+    return np.asarray(z, dtype=np.float64) / FEATURE_SCALE
+
 _BANDS = [(20, 60), (60, 250), (250, 1000), (1000, 4000), (4000, 10000), (10000, 20000)]
 
 

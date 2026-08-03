@@ -18,7 +18,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from timbre_graph_lab.config import LabConfig, ROLES
+from timbre_graph_lab.config import LabConfig, ROLES, SEED
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_enable=False)
 console = Console()
@@ -193,6 +193,103 @@ def parity(
                 "for features/training only"
             )
             raise typer.Exit(1)
+
+
+@app.command()
+def probe(
+    per_role_index: int = typer.Option(0, help="which corpus anchor to take per role"),
+    out: str = typer.Option("responses.json", help="where to write the response set"),
+    render_avg: int = typer.Option(3),
+) -> None:
+    """Measure Jacobians for one anchor per role (the on-demand prober).
+
+    This is what replaces the learned model: rendering is ~100x real-time, so
+    measuring the six patches the user actually picked beats predicting them
+    (0.534 vs 0.135 delta-cosine — see docs/TRAINING.md C12).
+    """
+    import time
+
+    from timbre_graph_lab.corpus import load_manifest
+    from timbre_graph_lab.prober import probe_anchor, write_responses
+    from timbre_graph_lab.worker import RenderWorker
+
+    cfg = LabConfig()
+    manifest = load_manifest(cfg)
+    worker = RenderWorker(cfg)
+    responses, paths = {}, {}
+    for role in ROLES:
+        pool = [e for e in manifest["entries"] if role in e["roles"]]
+        if not pool:
+            console.print(f"[yellow]{role}: no anchors[/yellow]")
+            continue
+        entry = pool[min(per_role_index, len(pool) - 1)]
+        t0 = time.time()
+        r = probe_anchor(worker, role, entry["path"], avg=render_avg,
+                         name=entry["name"])
+        if r is None:
+            console.print(f"[yellow]{role}: {entry['name']} unusable[/yellow]")
+            continue
+        r.preset_id = entry["preset_id"]
+        responses[role] = r
+        paths[role] = entry["path"]
+        console.print(
+            f"{role:6s} {entry['name'][:26]:26s} "
+            f"{int(r.usable.sum())}/{len(r.param_names)} live params  "
+            f"{r.n_renders} renders  {time.time()-t0:.1f}s"
+        )
+    p = write_responses(responses, cfg.workspace / out)
+    (cfg.workspace / "anchor_paths.json").write_text(json.dumps(paths, indent=1))
+    console.print(f"responses -> {p}")
+
+
+@app.command()
+def verify(
+    responses: str = typer.Option("responses.json"),
+    n_gestures: int = typer.Option(4, help="random leader gestures to test"),
+    leader: str = typer.Option("lead"),
+    render_avg: int = typer.Option(3),
+) -> None:
+    """Render-verify coupling against knob-copy and no-move baselines."""
+    import numpy as np
+
+    from timbre_graph_lab.prober import read_responses
+    from timbre_graph_lab.verify import summarize, verify_gesture
+    from timbre_graph_lab.worker import RenderWorker
+
+    cfg = LabConfig()
+    resp = read_responses(cfg.workspace / responses)
+    paths = json.loads((cfg.workspace / "anchor_paths.json").read_text())
+    if leader not in resp:
+        raise SystemExit(f"leader {leader!r} not in responses ({list(resp)})")
+
+    worker = RenderWorker(cfg)
+    lead = resp[leader]
+    live = np.flatnonzero(lead.usable)
+    rng = np.random.default_rng(SEED)
+    results = []
+    for g in range(n_gestures):
+        dx = np.zeros(len(lead.param_names))
+        # a plausible sound-design gesture: 1-3 live controls, moderate size
+        for i in rng.choice(live, size=min(3, len(live)), replace=False):
+            dx[i] = rng.choice([-1, 1]) * rng.uniform(0.05, 0.12)
+        res = verify_gesture(worker, resp, paths, leader, dx, avg=render_avg)
+        results.append(res)
+        console.print(f"gesture {g+1}/{n_gestures}: " + "  ".join(
+            f"{r['role']}={r['coupled']['cosine'] if isinstance(r.get('coupled'), dict) else 'x'}"
+            for r in res["followers"]))
+
+    summary = summarize(results)
+    out = cfg.reports_dir / "verify.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"summary": summary, "gestures": results}, indent=1))
+    console.print("\n[bold]render-verified achieved-vs-intended cosine[/bold]")
+    for arm in ("coupled", "copy", "none"):
+        console.print(f"  {arm:8s} {summary[f'{arm}_cosine_median']}")
+    console.print(f"  by role: {summary['by_role']}")
+    console.print(
+        f"\n{'[green]COUPLING BEATS KNOB-COPY[/green]' if summary.get('beats_knob_copy') else '[red]does NOT beat knob-copy[/red]'}"
+        f"   (n={summary['n_observations']})  -> {out}"
+    )
 
 
 @app.command()
