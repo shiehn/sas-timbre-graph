@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROBE_VERSION = "probes-v1"
-POLICY_VERSION = "policy-v1"
+# v2: discreteness is probed rather than trusted (350 nominal params -> 97
+# real, 0 switches) and every anchor perturbs a shared core set. The parameter
+# VECTOR changed, so v1 shards are dimensionally incompatible — never mix.
+POLICY_VERSION = "policy-v2"
 CORPUS_VERSION = "corpus-v1"
 
 ROLES = ["kick", "snare", "hat", "bass", "pad", "lead"]
