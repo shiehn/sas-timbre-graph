@@ -3,14 +3,10 @@
 A [Signals & Sorcery](https://signalsandsorcery.com) plugin for **sound exploration** — six Surge XT tracks behave as one instrument, so a single dial reshapes the whole ensemble at once and you go hunting for a sound instead of programming one.
 
 <p align="center">
-  <img src="assets/signals-and-sorcery.png" alt="Signals & Sorcery" width="420" />
+  <img src="assets/timbre-graph.png" alt="Timbre Graph" width="460" />
 </p>
 
 > Part of the **[Signals & Sorcery](https://signalsandsorcery.com)** ecosystem.
-
-<p align="center">
-  <img src="assets/timbre-graph.png" alt="Timbre Graph" width="460" />
-</p>
 
 ## What it does
 
