@@ -58,6 +58,10 @@ export function createTimbreGraphAdapter(
       estimatedGenerationMs: 800,
     },
     features: {
+      // Role-derived deterministic generation: no prompt, no LLM, no auth
+      // gate. Without this the core's generate handler silently no-ops on
+      // promptless rows (observed live: Generate All did nothing).
+      promptlessGeneration: true,
       instrumentPicker: false,
       bulkComposePlaceholders: false,
       exportMidi: true,
