@@ -117,10 +117,18 @@ export function reachableDirections(
 export function MorphSection({
   host,
   activeSceneId,
+  resolveTrackIds,
   onTracksChanged,
 }: {
   host: PluginHost;
   activeSceneId: string | null;
+  /**
+   * Role -> engine ids of the LIVE tracks to drive, read at apply time.
+   * The graph's stamped track_id is only a fallback: groups get removed and
+   * re-added, and a dial faithfully writing to deleted tracks is silent
+   * (observed live — stamped 1235-1255 vs live 1464-1484).
+   */
+  resolveTrackIds: (role: string) => string[];
   onTracksChanged: () => void;
 }) {
   const [graph, setGraph] = useState<MorphGraph | null>(null);
@@ -243,10 +251,14 @@ export function MorphSection({
       }
       applying.current = true;
       try {
+        let wrote = 0;
         for (const role of Object.keys(graph.roles)) {
           if (linked[role] === false) continue;
           const t = graph.roles[role];
-          if (!t || t.declined || !t.track_id) continue;
+          if (!t || t.declined) continue;
+          const live = resolveTrackIds(role);
+          const targets = live.length > 0 ? live : t.track_id ? [t.track_id] : [];
+          if (targets.length === 0) continue;
           const values = paramsAt(graph.control_points, t.snapshots, value);
           const params: Record<string, number> = {};
           t.param_names.forEach((name, i) => {
@@ -256,9 +268,14 @@ export function MorphSection({
             setStatus('This host predates SDK 2.57.0 — parameter writes unavailable.');
             return;
           }
-          await host.setSynthParameters(t.track_id, params);
+          for (const id of targets) {
+            await host.setSynthParameters(id, params);
+            wrote += 1;
+          }
         }
-        setStatus('');
+        setStatus(wrote === 0
+          ? 'No live tracks to drive — Add Graph first, then move the dial.'
+          : '');
       } catch (err) {
         setStatus(err instanceof Error ? err.message : 'could not apply parameters');
       } finally {
@@ -270,7 +287,7 @@ export function MorphSection({
         }
       }
     },
-    [graph, host, linked],
+    [graph, host, linked, resolveTrackIds],
   );
 
   const onDial = useCallback(
@@ -445,12 +462,25 @@ export function TimbreGraphPanel(props: PluginUIProps) {
     adapter: adapter as GeneratorPanelAdapter,
   });
 
+  // Live track list behind a ref so the resolver (and therefore the slots
+  // memo) stays referentially stable while always reading current tracks.
+  const tracksRef = useRef(core.tracks);
+  tracksRef.current = core.tracks;
+  const resolveTrackIds = useCallback((role: string): string[] => {
+    const want = toTimbreRole(role);
+    return tracksRef.current
+      .filter((t) => toTimbreRole(t.role) === want
+        || toTimbreRole(t.handle.role) === want)
+      .map((t) => t.handle.id);
+  }, []);
+
   const slots = useMemo(
     () => ({
       beforeRows: (
         <MorphSection
           host={props.host}
           activeSceneId={props.activeSceneId}
+          resolveTrackIds={resolveTrackIds}
           onTracksChanged={() => void core.loadTracks()}
         />
       ),

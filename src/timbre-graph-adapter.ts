@@ -27,8 +27,8 @@ import { createSurgeSoundAdapter } from '@signalsandsorcery/plugin-sdk';
 import {
   APP_ROLE_TOKENS,
   TIMBRE_ROLES,
-  tiledPattern,
   toTimbreRole,
+  variedPattern,
 } from './role-patterns';
 import {
   TIMBRE_GROUP_META_KEY,
@@ -180,7 +180,9 @@ export function createTimbreGraphAdapter(
           startTime: 0,
           endTime,
           tempo: bpm,
-          notes: tiledPattern(role, bars, beatsPerBar),
+          // fresh seed per click: every Generate is a NEW role-true pattern
+          notes: variedPattern(role, bars, beatsPerBar,
+            Math.floor(Math.random() * 0xffffffff)),
         });
         services.updateTrack(track.handle.id, {
           hasMidi: true,

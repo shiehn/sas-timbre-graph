@@ -119,7 +119,7 @@ describe('TimbreGraphPanel rendering', () => {
 
   it('explains how to build a graph when none is loaded', () => {
     const { container, cleanup } = render(
-      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('Add Graph');
     expect(container.textContent).toContain('Generate All');
@@ -162,7 +162,7 @@ describe('TimbreGraphPanel rendering', () => {
     };
 
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
     await act(async () => {
       await Promise.resolve();
@@ -192,7 +192,7 @@ describe('TimbreGraphPanel import flow', () => {
 
   it('offers an import affordance in the empty state', () => {
     const { container, cleanup } = render(
-      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('Import morph graph');
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
@@ -239,7 +239,7 @@ describe('TimbreGraphPanel import flow', () => {
     });
 
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -291,7 +291,7 @@ describe('TimbreGraphPanel import flow', () => {
     };
     const file = new File([JSON.stringify(graph)], 'g.json');
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', resolveTrackIds: () => [], onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -347,5 +347,93 @@ describe('group meta + role mapping', () => {
     for (const n of odd) {
       expect(n.startBeat + n.durationBeats).toBeLessThanOrEqual(3 + 1e-9);
     }
+  });
+});
+
+describe('seeded MIDI variation', () => {
+  const { variedPattern } = require('../src/role-patterns');
+
+  it('is deterministic for a given seed', () => {
+    expect(variedPattern('kick', 4, 4, 123)).toEqual(variedPattern('kick', 4, 4, 123));
+  });
+
+  it('regenerating with a new seed changes the pattern (the live complaint)', () => {
+    const roles = ['kick', 'snare', 'hat', 'bass', 'pad', 'lead'] as const;
+    for (const role of roles) {
+      const runs = new Set(
+        [1, 2, 3, 4, 5].map((seed) => JSON.stringify(variedPattern(role, 4, 4, seed))),
+      );
+      expect(runs.size).toBeGreaterThan(1);
+    }
+  });
+
+  it('variation never breaks role identity or the scene bounds', () => {
+    for (let seed = 0; seed < 30; seed++) {
+      for (const n of variedPattern('kick', 2, 4, seed)) {
+        expect(n.pitch).toBe(36);                     // a kick stays a kick at C1
+      }
+      for (const n of variedPattern('hat', 2, 4, seed)) {
+        expect(n.pitch).toBe(66);
+      }
+      for (const role of ['bass', 'pad', 'lead'] as const) {
+        for (const n of variedPattern(role, 2, 4, seed)) {
+          expect(n.startBeat + n.durationBeats).toBeLessThanOrEqual(8 + 1e-9);
+          expect(n.velocity).toBeGreaterThanOrEqual(1);
+          expect(n.velocity).toBeLessThanOrEqual(127);
+        }
+      }
+    }
+  });
+});
+
+describe('dial drives LIVE tracks, not stamped ids', () => {
+  function render(el: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(el));
+    return { container, cleanup: () => { act(() => root.unmount()); container.remove(); } };
+  }
+
+  it('writes to the resolver-supplied ids even when the stamp is stale', async () => {
+    const writes: string[] = [];
+    const graph = {
+      version: 'morph-graph-v1',
+      axis: { name: 'softer', vector: [] },
+      control_points: [-1, 0, 1],
+      roles: {
+        kick: {
+          role: 'kick', preset_id: 'k', name: 'K', track_id: 'DEAD-1235',
+          param_names: ['a'], baseline: [0.5],
+          snapshots: [[0.4], [0.5], [0.6]], cosine: [1, 1, 1], declined: false,
+        },
+      },
+    };
+    const host = {
+      getProjectData: async (k: string) => (k.endsWith('morph') ? graph : null),
+      setProjectData: async () => {},
+      setSynthParameters: async (trackId: string) => { writes.push(trackId); },
+    };
+    const { container, cleanup } = render(
+      createElement(MorphSection, {
+        host, activeSceneId: 's1',
+        resolveTrackIds: (role: string) => (role === 'kick' ? ['LIVE-1464'] : []),
+        onTracksChanged: () => {},
+      } as never),
+    );
+    await act(async () => Promise.resolve());
+    const slider = container.querySelector('input[type="range"]') as HTMLInputElement;
+    await act(async () => {
+      // controlled input: go through the native setter, then fire `input`
+      // (what React's onChange actually listens to for range elements)
+      const set = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value',
+      )?.set;
+      set?.call(slider, '0.9');
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(writes).toEqual(['LIVE-1464']);            // never DEAD-1235
+    cleanup();
   });
 });
