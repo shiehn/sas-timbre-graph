@@ -133,11 +133,21 @@ export function MorphSection({
 }) {
   const [graph, setGraph] = useState<MorphGraph | null>(null);
   const [control, setControl] = useState(0);
-  // Gesture scale. x1 is the render-verified magnitude — measured at 3-10%
-  // per parameter end-to-end, which reads as near-zero to the ear. Depth
-  // multiplies the DELTAS (relative mode), trading verified territory for
-  // audible drama; in a discovery tool the user's ear is the judge past x1.
-  const [depth, setDepth] = useState(3);
+  /**
+   * Gesture strength as a TARGET maximum parameter move, not a multiplier.
+   *
+   * The verified graph is timid on purpose (trust radius): end-to-end it moves
+   * a role's parameters by a mean of 3-10% of range, which is inaudible. A
+   * blunt multiplier is also uneven — a role whose deltas are half another's
+   * stays half as audible. So each role's delta VECTOR is rescaled so its
+   * largest component reaches `strength`, preserving the measured direction
+   * (which parameters, which way, in what proportion) while guaranteeing
+   * every preset moves by a comparable, audible amount.
+   *
+   * 0.12 is roughly the verified magnitude; higher is deliberately
+   * exploratory — this is a discovery tool and the ear is the judge.
+   */
+  const [strength, setStrength] = useState(0.5);
   const [linked, setLinked] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
@@ -271,10 +281,21 @@ export function MorphSection({
           // are sent, so untouched controls stay untouched.
           const values = paramsAt(graph.control_points, t.snapshots, value);
           const centre = paramsAt(graph.control_points, t.snapshots, 0);
+          const raw = values.map((v, i) => v - centre[i]);
+          // Rescale so this role's largest move reaches `strength`, keeping
+          // the measured direction and relative proportions intact. Also
+          // scales with dial position so the centre is still a no-op.
+          const peak = Math.max(...raw.map(Math.abs));
+          const span = Math.max(
+            Math.abs(graph.control_points[graph.control_points.length - 1]),
+            1e-9,
+          );
+          const dialFrac = Math.min(1, Math.abs(value) / span);
+          const gain = peak > 1e-9 ? (strength * dialFrac) / peak : 0;
           const params: Record<string, number> = {};
           t.param_names.forEach((name, i) => {
-            const delta = (values[i] - centre[i]) * depth;
-            if (Math.abs(delta) > 1e-6) params[name] = delta;
+            const delta = raw[i] * gain;
+            if (Math.abs(delta) > 1e-5) params[name] = delta;
           });
           if (Object.keys(params).length === 0) continue;
           if (typeof host.setSynthParameters !== 'function') {
@@ -300,7 +321,7 @@ export function MorphSection({
         }
       }
     },
-    [graph, host, linked, resolveTrackIds, depth],
+    [graph, host, linked, resolveTrackIds, strength],
   );
 
   const onDial = useCallback(
@@ -392,13 +413,15 @@ export function MorphSection({
           depth
           <select
             aria-label="morph depth"
-            value={depth}
-            onChange={(e) => setDepth(Number(e.target.value))}
+            value={strength}
+            onChange={(e) => setStrength(Number(e.target.value))}
             style={{ font: 'inherit', fontSize: 11 }}
           >
-            {[1, 2, 3, 5, 8].map((d) => (
-              <option key={d} value={d}>×{d}</option>
-            ))}
+            <option value={0.12}>verified</option>
+            <option value={0.25}>subtle</option>
+            <option value={0.5}>strong</option>
+            <option value={0.75}>extreme</option>
+            <option value={1}>max</option>
           </select>
         </label>
         <button

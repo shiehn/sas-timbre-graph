@@ -440,11 +440,13 @@ describe('dial drives LIVE tracks, not stamped ids', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(writes).toEqual(['LIVE-1464']);            // never DEAD-1235
-    // deltas ride the live sound: relative mode, scaled from the dial centre
+    // deltas ride the live sound: relative mode, normalized from the centre
     expect(payloads[0].options).toEqual({ relative: true });
     const delta = payloads[0].params['a'];
     expect(Math.sign(delta)).toBe(1);                 // +0.9 of the dial => up
-    expect(Math.abs(delta)).toBeGreaterThan(0.05);    // depth-scaled, not raw
+    // the graph's own move is a timid 0.1; normalization must lift the peak
+    // toward the strength target (default 'strong' = 0.5) x dial fraction 0.9
+    expect(Math.abs(delta)).toBeGreaterThan(0.3);
     cleanup();
   });
 });
@@ -516,5 +518,50 @@ describe('group rows hidden until generation', () => {
     );
     expect(rendered).toEqual(['a', 'b']);
     cleanup();
+  });
+});
+
+describe('gesture normalization makes every role audible', () => {
+  /**
+   * The verified graph is timid by design (trust radius): roles move their
+   * parameters by a mean of 3-10% of range, and unevenly between roles — one
+   * role's deltas can be a third of another's. A blunt multiplier keeps that
+   * imbalance. Rescaling each role's delta VECTOR to a target peak preserves
+   * the measured direction while making every preset move comparably.
+   */
+  const normalize = (raw: number[], strength: number, dialFrac: number): number[] => {
+    const peak = Math.max(...raw.map(Math.abs));
+    const gain = peak > 1e-9 ? (strength * dialFrac) / peak : 0;
+    return raw.map((v) => v * gain);
+  };
+
+  it('lifts a timid role to the target peak', () => {
+    const timid = [0.02, -0.01, 0.03];                 // 3% max, inaudible
+    const out = normalize(timid, 0.5, 1);
+    expect(Math.max(...out.map(Math.abs))).toBeCloseTo(0.5);
+  });
+
+  it('equalises loud and quiet roles to the same peak', () => {
+    const loud = normalize([0.19, -0.10], 0.5, 1);
+    const quiet = normalize([0.03, -0.015], 0.5, 1);
+    expect(Math.max(...loud.map(Math.abs))).toBeCloseTo(Math.max(...quiet.map(Math.abs)));
+  });
+
+  it('preserves direction and relative proportions', () => {
+    const raw = [0.10, -0.05, 0.025];
+    const out = normalize(raw, 0.5, 1);
+    expect(out.map((v) => Math.sign(v))).toEqual([1, -1, 1]);
+    expect(out[0] / out[1]).toBeCloseTo(raw[0] / raw[1]);
+    expect(out[0] / out[2]).toBeCloseTo(raw[0] / raw[2]);
+  });
+
+  it('scales with dial position and is a no-op at centre', () => {
+    const raw = [0.1, -0.05];
+    expect(Math.max(...normalize(raw, 0.5, 0).map(Math.abs))).toBe(0);
+    expect(Math.max(...normalize(raw, 0.5, 0.5).map(Math.abs))).toBeCloseTo(0.25);
+  });
+
+  it('handles an all-zero (declined) role without dividing by zero', () => {
+    expect(normalize([0, 0, 0], 0.5, 1)).toEqual([0, 0, 0]);
   });
 });
