@@ -522,7 +522,7 @@ describe('group rows hidden until generation', () => {
   });
 });
 
-describe('gesture normalization makes every role audible', () => {
+describe('gesture normalization by AUDIBLE EFFECT', () => {
   /**
    * The verified graph is timid by design (trust radius): roles move their
    * parameters by a mean of 3-10% of range, and unevenly between roles — one
@@ -530,27 +530,62 @@ describe('gesture normalization makes every role audible', () => {
    * imbalance. Rescaling each role's delta VECTOR to a target peak preserves
    * the measured direction while making every preset move comparably.
    */
-  const normalize = (raw: number[], strength: number, dialFrac: number): number[] => {
-    const peak = Math.max(...raw.map(Math.abs));
-    const gain = peak > 1e-9 ? (strength * dialFrac) / peak : 0;
-    return raw.map((v) => v * gain);
+  /** The panel's rule: scale by predicted perceptual effect, not delta size. */
+  const normalize = (
+    raw: number[], sens: number[], strength: number, dialFrac: number,
+  ): number[] => {
+    const effect = Math.sqrt(
+      raw.reduce((a, d, i) => a + (d * (sens[i] ?? 0)) ** 2, 0),
+    );
+    const gain = effect > 1e-9 ? (strength * dialFrac) / effect : 0;
+    return raw.map((v) => Math.max(-0.6, Math.min(0.6, v * gain)));
   };
 
-  it('lifts a timid role to the target peak', () => {
-    const timid = [0.02, -0.01, 0.03];                 // 3% max, inaudible
-    const out = normalize(timid, 0.5, 1);
-    expect(Math.max(...out.map(Math.abs))).toBeCloseTo(0.5);
+  it('spends the budget on AUDIBLE params, not the biggest delta', () => {
+    // the live lead bug: biggest delta on a near-inert control (a_width,
+    // sensitivity 0.46) while the audible one (cutoff, 10.95) barely moved
+    const raw = [0.133, 0.005];           // [width, cutoff]
+    const sens = [0.46, 10.95];
+    const out = normalize(raw, sens, 4, 1);
+    // cutoff's move must not be dwarfed: its EFFECT should dominate
+    const widthEffect = Math.abs(out[0] * sens[0]);
+    const cutoffEffect = Math.abs(out[1] * sens[1]);
+    expect(cutoffEffect).toBeGreaterThan(widthEffect * 0.5);
   });
 
-  it('equalises loud and quiet roles to the same peak', () => {
-    const loud = normalize([0.19, -0.10], 0.5, 1);
-    const quiet = normalize([0.03, -0.015], 0.5, 1);
-    expect(Math.max(...loud.map(Math.abs))).toBeCloseTo(Math.max(...quiet.map(Math.abs)));
+  it('reaches the requested perceptual effect when no clamp is hit', () => {
+    const raw = [0.05, -0.02];
+    const sens = [40, 20];              // audible enough to need small deltas
+    const out = normalize(raw, sens, 4, 1);
+    expect(Math.max(...out.map(Math.abs))).toBeLessThan(0.6);   // unclamped
+    const effect = Math.sqrt(out.reduce((a, d, i) => a + (d * sens[i]) ** 2, 0));
+    expect(effect).toBeCloseTo(4, 1);
   });
 
-  it('preserves direction and relative proportions', () => {
+  it('caps the effect rather than railing params when sensitivity is low', () => {
+    // asking 4 units of change from near-inert controls must clamp, not
+    // demand impossible parameter moves
+    const raw = [0.02, -0.01];
+    const sens = [5, 3];
+    const out = normalize(raw, sens, 4, 1);
+    expect(Math.max(...out.map(Math.abs))).toBeCloseTo(0.6);
+    const effect = Math.sqrt(out.reduce((a, d, i) => a + (d * sens[i]) ** 2, 0));
+    expect(effect).toBeLessThan(4);
+  });
+
+  it('equalises perceived change across roles of different timidity', () => {
+    const eff = (out: number[], sens: number[]): number =>
+      Math.sqrt(out.reduce((a, d, i) => a + (d * sens[i]) ** 2, 0));
+    const a = normalize([0.19, -0.10], [2, 1], 4, 1);
+    const b = normalize([0.03, -0.015], [2, 1], 4, 1);
+    expect(eff(a, [2, 1])).toBeCloseTo(eff(b, [2, 1]), 1);
+  });
+
+  it('preserves direction and relative proportions below the clamp', () => {
     const raw = [0.10, -0.05, 0.025];
-    const out = normalize(raw, 0.5, 1);
+    const sens = [30, 30, 30];
+    const out = normalize(raw, sens, 2, 1);
+    expect(Math.max(...out.map(Math.abs))).toBeLessThan(0.6);
     expect(out.map((v) => Math.sign(v))).toEqual([1, -1, 1]);
     expect(out[0] / out[1]).toBeCloseTo(raw[0] / raw[1]);
     expect(out[0] / out[2]).toBeCloseTo(raw[0] / raw[2]);
@@ -558,12 +593,20 @@ describe('gesture normalization makes every role audible', () => {
 
   it('scales with dial position and is a no-op at centre', () => {
     const raw = [0.1, -0.05];
-    expect(Math.max(...normalize(raw, 0.5, 0).map(Math.abs))).toBe(0);
-    expect(Math.max(...normalize(raw, 0.5, 0.5).map(Math.abs))).toBeCloseTo(0.25);
+    const sens = [4, 2];
+    expect(Math.max(...normalize(raw, sens, 4, 0).map(Math.abs))).toBe(0);
+    const half = normalize(raw, sens, 4, 0.5);
+    const eff = Math.sqrt(half.reduce((a, d, i) => a + (d * sens[i]) ** 2, 0));
+    expect(eff).toBeCloseTo(2, 1);
+  });
+
+  it('never asks for an absurd move even when sensitivity is tiny', () => {
+    const out = normalize([0.1, 0.1], [0.001, 0.001], 16, 1);
+    expect(Math.max(...out.map(Math.abs))).toBeLessThanOrEqual(0.6);
   });
 
   it('handles an all-zero (declined) role without dividing by zero', () => {
-    expect(normalize([0, 0, 0], 0.5, 1)).toEqual([0, 0, 0]);
+    expect(normalize([0, 0, 0], [1, 1, 1], 4, 1)).toEqual([0, 0, 0]);
   });
 });
 

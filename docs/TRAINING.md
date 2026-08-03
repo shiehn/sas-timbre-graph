@@ -639,6 +639,76 @@ The proposal's Linux-parity gate (§9.5) stands: never render corpus data on
 Linux until the same preset + probe produces matching descriptors vs macOS;
 until then RunPod does features/training only, on Mac-rendered features.
 
+## C14 — The anchor was the ceiling, not the morph (2026-08-03)
+
+Live play exposed a failure the whole pipeline had been reporting as success:
+the dial moved, every parameter write landed, the artifact validated — and the
+lead never changed audibly. Integration tests (`tests/test_shipped_graph_integration.py`)
+were written to assert the thing that actually matters: for every role, every
+parameter the artifact marks audible must measurably change a real render.
+They failed immediately, and the two causes were both upstream of the morph.
+
+### C14a — `‖J‖` overstates audibility, and the solver chased it
+
+Shipped `sensitivity` came from the probe Jacobian's row norm. A parameter can
+register a finite-difference response at the probe's `EPS = 0.04` yet leave the
+render unchanged at the step sizes the panel uses. Worse, the damped
+minimum-norm solve *prefers* those parameters: reaching a target through a
+weakly-coupled control needs a large delta, so the least audible parameters
+attract the biggest moves. The live lead spent its whole gesture on `a_width`
+(measured audibility 0.46) while `a_filter_1_cutoff` (10.95) barely moved.
+
+Fix, in two places so it cannot drift back:
+- each anchor's `usable` mask is narrowed to parameters whose render
+  demonstrably changes, so the solver *cannot* select an inert control;
+- `sensitivity` ships that measured magnitude (`meta["measured_sensitivity"]`,
+  preferred over `‖J‖` by `_sensitivity()` in `morph.py`).
+
+### C14b — Anchor choice, measured
+
+The first graph took corpus index 0 per role. That handed the hat
+`Leads/Chatter.fxp`, which has **zero** measurably audible parameters — no
+amount of gesture scaling can morph a patch with no reachable timbre range.
+Anchors are now screened (`pick_anchors.py`) by measured audible-parameter
+count, which raised the kick from 3 to 15 and the hat from 0 to 13:
+
+| role | anchor | audible / probed |
+|---|---|---|
+| kick | `Percussion/Kick Tech 2.fxp` | 15 / 34 |
+| snare | `Keys/Experiment.fxp` | 14 / 28 |
+| hat | `Plucks/That Comb Magic.fxp` | 13 / 28 |
+| bass | `Basses/Bass 1.fxp` | 17 / 34 |
+| pad | `Chords/Tek Stab.fxp` | 16 / 30 |
+| lead | `Brass/OB-8 Jump.fxp` | 17 / 34 |
+
+Graph quality rose to **6/6 roles moving, 10/12 directions working**
+(median endpoint cosine 0.625, monotonicity 0.875).
+
+### C14c — A patch that wanders cannot demonstrate a morph
+
+`Chords/Inharmonic Stab.fxp` screened well but collapsed to 1 audible
+parameter on re-measurement: its own noise floor is σ ≈ 0.43 against bass's
+0.001, so the audibility threshold rises to ~1.95 and only a monster parameter
+clears it. `freeze_stochastic()` cannot help — the patch uses a genuine noise
+oscillator. Two consequences:
+
+- screening now rejects anchors above `MAX_SIGMA = 0.05`, because a patch whose
+  own renders differ run-to-run will also mask the dial in the listener's ear;
+- σ estimated from a handful of renders is *itself* unstable (the same patch
+  measured 0.43 and then under the gate minutes later), so measurement and
+  verification must average identically or they compare different quantities.
+  The integration test previously took `z1` from a single render while
+  sensitivity came from an averaged one; both now use `render_descriptors(k=2)`.
+
+### Two roles are still musically mismatched
+
+`snare` is a Keys patch and `hat` is a Plucks patch. The role-appropriate
+Percussion candidates (`Snare Tight`, `Snare 2`, `Closed Hat`) all score −1 —
+they fail to load or render silent, the same ~10% preset-load gap tracked
+against a possible `surgepy` spike. Morphability was chosen over category
+fidelity so every role can actually move; closing the load gap is what would
+let a real hi-hat back in.
+
 ## Licensing note
 
 Corpus manifests retain source + category; 3rd-party patches ship with Surge

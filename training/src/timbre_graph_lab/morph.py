@@ -71,6 +71,13 @@ class RoleTrack:
     # (host.applySurgeFxpPreset) before applying snapshots on top of it.
     fxp_path: str
     param_names: list[str]
+    # Per-parameter measured audibility: the row norm of the anchor's Jacobian
+    # in standardized descriptor units. Ships with the artifact because a
+    # consumer cannot otherwise tell an audible control from an inert one —
+    # and damped least-squares puts its LARGEST deltas on the LEAST sensitive
+    # parameters (a sensitive control needs only a small move), so scaling a
+    # gesture by delta magnitude alone scales it to its most inaudible part.
+    sensitivity: list[float]
     baseline: np.ndarray
     snapshots: list[np.ndarray] = field(default_factory=list)  # absolute raw
     cosine: list[float] = field(default_factory=list)
@@ -87,6 +94,7 @@ class RoleTrack:
             "role": self.role, "preset_id": self.preset_id, "name": self.name,
             "fxp_path": self.fxp_path,
             "param_names": self.param_names,
+            "sensitivity": [round(float(v), 5) for v in self.sensitivity],
             "baseline": self.baseline.tolist(),
             "snapshots": [s.tolist() for s in self.snapshots],
             "cosine": [round(float(c), 4) for c in self.cosine],
@@ -154,6 +162,24 @@ def _walk(
     return snapshots, cosines, projections
 
 
+def _sensitivity(resp) -> list[float]:
+    """How much each parameter is expected to move the sound, per unit travel.
+
+    The panel divides its gesture budget by these numbers, so an optimistic
+    value silences a role: it spends the whole budget on a parameter that does
+    nothing. A measured render-change magnitude (stamped into `meta` by the
+    audibility pass) is therefore preferred over the Jacobian row norm, which
+    can register a response that is inaudible at panel step sizes.
+    """
+    measured = resp.meta.get("measured_sensitivity")
+    if measured is not None:
+        return [round(float(v), 6) for v in measured]
+    return [
+        float(np.linalg.norm(resp.J[i])) if resp.usable[i] else 0.0
+        for i in range(len(resp.param_names))
+    ]
+
+
 def build_morph_graph(
     worker,
     responses: dict,
@@ -184,6 +210,7 @@ def build_morph_graph(
             role=role, preset_id=resp.preset_id, name=resp.name,
             fxp_path=portable_fxp_path(str(paths[role])),
             param_names=list(resp.param_names), baseline=resp.baseline.copy(),
+            sensitivity=_sensitivity(resp),
             snapshots=snaps, cosine=cos, projection=proj,
         )
 

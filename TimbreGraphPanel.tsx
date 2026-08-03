@@ -67,6 +67,8 @@ export interface MorphGraph {
       fxp_path?: string;
       name: string;
       param_names: string[];
+      /** Measured per-parameter audibility (Jacobian row norm); 0 = inert. */
+      sensitivity?: number[];
       baseline: number[];
       snapshots: number[][];
       cosine: number[];
@@ -146,20 +148,23 @@ export function MorphSection({
   const [imported, setImported] = useState(false);
   const [control, setControl] = useState(0);
   /**
-   * Gesture strength as a TARGET maximum parameter move, not a multiplier.
+   * Gesture strength as a target PERCEPTUAL effect, in standardized
+   * descriptor units (1.0 ~ one corpus standard deviation of timbre change).
    *
-   * The verified graph is timid on purpose (trust radius): end-to-end it moves
-   * a role's parameters by a mean of 3-10% of range, which is inaudible. A
-   * blunt multiplier is also uneven — a role whose deltas are half another's
-   * stays half as audible. So each role's delta VECTOR is rescaled so its
-   * largest component reaches `strength`, preserving the measured direction
-   * (which parameters, which way, in what proportion) while guaranteeing
-   * every preset moves by a comparable, audible amount.
+   * Scaling by parameter movement was measurably backwards. Damped
+   * least-squares prefers small moves, so a sensitive control needs only a
+   * tiny delta while an inert one needs a large one — meaning the LARGEST
+   * deltas land on the LEAST audible parameters. Normalising to peak delta
+   * therefore scaled each gesture to its most inaudible component: the lead's
+   * budget went to `a_width` (measured audibility 0.46) while
+   * `a_filter_1_cutoff` (10.95, i.e. 24x more audible) barely moved, and the
+   * lead never audibly changed.
    *
-   * 0.12 is roughly the verified magnitude; higher is deliberately
-   * exploratory — this is a discovery tool and the ear is the judge.
+   * Using the shipped per-parameter sensitivity, the gesture is scaled by its
+   * predicted audible effect instead, so every role moves by a comparable
+   * amount of PERCEIVED change.
    */
-  const [strength, setStrength] = useState(0.5);
+  const [strength, setStrength] = useState(4);
   const [linked, setLinked] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
@@ -304,19 +309,35 @@ export function MorphSection({
           const values = paramsAt(graph.control_points, t.snapshots, value);
           const centre = paramsAt(graph.control_points, t.snapshots, 0);
           const raw = values.map((v, i) => v - centre[i]);
-          // Rescale so this role's largest move reaches `strength`, keeping
-          // the measured direction and relative proportions intact. Also
-          // scales with dial position so the centre is still a no-op.
-          const peak = Math.max(...raw.map(Math.abs));
           const span = Math.max(
             Math.abs(graph.control_points[graph.control_points.length - 1]),
             1e-9,
           );
           const dialFrac = Math.min(1, Math.abs(value) / span);
-          const gain = peak > 1e-9 ? (strength * dialFrac) / peak : 0;
+
+          // Predicted audible effect of the gesture: |delta ⊙ sensitivity|.
+          // Scaling by this (rather than by delta size) puts the budget where
+          // the sound actually lives. Falls back to delta magnitude for a
+          // legacy artifact that carries no sensitivity.
+          const sens = t.sensitivity;
+          const effect = Math.sqrt(
+            raw.reduce((acc, d, i) => {
+              const w = sens ? (sens[i] ?? 0) : 1;
+              return acc + (d * w) ** 2;
+            }, 0),
+          );
+          const fallbackPeak = Math.max(...raw.map(Math.abs));
+          const gain = sens && effect > 1e-9
+            ? (strength * dialFrac) / effect
+            : fallbackPeak > 1e-9
+              ? (0.5 * dialFrac) / fallbackPeak
+              : 0;
+
           const params: Record<string, number> = {};
           t.param_names.forEach((name, i) => {
-            const delta = raw[i] * gain;
+            // Per-parameter ceiling: a gain sized for perceptual effect can
+            // ask an inert control for an absurd move, which just rails it.
+            const delta = Math.max(-0.6, Math.min(0.6, raw[i] * gain));
             if (Math.abs(delta) > 1e-5) params[name] = delta;
           });
           if (Object.keys(params).length === 0) continue;
@@ -450,11 +471,11 @@ export function MorphSection({
             onChange={(e) => setStrength(Number(e.target.value))}
             style={{ font: 'inherit', fontSize: 11 }}
           >
-            <option value={0.12}>verified</option>
-            <option value={0.25}>subtle</option>
-            <option value={0.5}>strong</option>
-            <option value={0.75}>extreme</option>
-            <option value={1}>max</option>
+            <option value={1}>verified</option>
+            <option value={2}>subtle</option>
+            <option value={4}>strong</option>
+            <option value={8}>extreme</option>
+            <option value={16}>max</option>
           </select>
         </label>
         {imported && (
