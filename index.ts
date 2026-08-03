@@ -20,6 +20,7 @@ import type {
   PluginSettingsSchema,
 } from '@signalsandsorcery/plugin-sdk';
 import { TimbreGraphPanel } from './TimbreGraphPanel';
+import manifest from './plugin.json';
 
 export class TimbreGraphPlugin implements GeneratorPlugin {
   readonly id = '@signalsandsorcery/timbre-graph';
@@ -50,3 +51,6 @@ export class TimbreGraphPlugin implements GeneratorPlugin {
 }
 
 export default TimbreGraphPlugin;
+export { TimbreGraphPanel };
+/** sas-app's `src/plugins/index.ts` imports the class AND manifest from here. */
+export const timbreGraphManifest = manifest;

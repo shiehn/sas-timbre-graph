@@ -293,6 +293,83 @@ def verify(
 
 
 @app.command()
+def morph(
+    responses: str = typer.Option("responses.json"),
+    axis: str = typer.Option("softer", help="semantic axis to sweep"),
+    points: int = typer.Option(9, help="control positions on the dial"),
+    budget: int = typer.Option(24, help="renders per control position"),
+    out: str = typer.Option("", help="output path (default morph-<axis>.json)"),
+) -> None:
+    """Build the precomputed morph graph the plugin panel consumes."""
+    from timbre_graph_lab.morph import build_morph_graph, save_graph
+    from timbre_graph_lab.prober import read_responses
+    from timbre_graph_lab.worker import RenderWorker
+
+    cfg = LabConfig()
+    resp = read_responses(cfg.workspace / responses)
+    paths = json.loads((cfg.workspace / "anchor_paths.json").read_text())
+    worker = RenderWorker(cfg)
+    graph = build_morph_graph(worker, resp, paths, axis_name=axis,
+                              n_points=points, budget=budget)
+    dest = cfg.workspace / (out or f"morph-{axis}.json")
+    save_graph(graph, dest)
+
+    q = graph["quality"]
+    console.print(f"\n[bold]morph graph — axis '{axis}'[/bold]")
+    console.print(f"{'role':7s}{'neg end':>9s}{'pos end':>9s}{'monoton':>9s}{'max jump':>10s}")
+    for role in ROLES:
+        v = q.get(role)
+        if not v:
+            continue
+        fmt = lambda d: (f"{d['endpoint_cosine']:+.2f}" if d and d.get("moves") else "hold")
+        console.print(f"{role:7s}{fmt(v.get('negative')):>9s}{fmt(v.get('positive')):>9s}"
+                      f"{v['monotonicity']:9.2f}{v['max_param_jump']:10.3f}")
+    s = q["_summary"]
+    console.print(f"\nroles moving {s['roles_moving']}  directions working {s['directions_working']}"
+                  f"  median endpoint cos {s['median_endpoint_cosine']}")
+    console.print(f"graph -> {dest}")
+
+
+@app.command()
+def axes(
+    responses: str = typer.Option("responses.json"),
+    budget: int = typer.Option(45, help="renders per (role, axis) probe"),
+) -> None:
+    """Measure which semantic axes each anchor can express (the coupling policy)."""
+    from timbre_graph_lab.axes import AXES, achievability, best_axes, shared_axes
+    from timbre_graph_lab.prober import read_responses
+    from timbre_graph_lab.refine import make_surge_measure
+    from timbre_graph_lab.worker import RenderWorker
+
+    cfg = LabConfig()
+    resp = read_responses(cfg.workspace / responses)
+    paths = json.loads((cfg.workspace / "anchor_paths.json").read_text())
+    worker = RenderWorker(cfg)
+
+    tables: dict[str, dict[str, float]] = {}
+    for role in ROLES:
+        if role not in resp or not worker.load_preset(paths[role]):
+            continue
+        tables[role] = achievability(
+            make_surge_measure(worker, resp[role], avg=1), resp[role], budget=budget
+        )
+    roles = list(tables)
+    console.print("\n[bold]achievability[/bold] (0.00 = declined)")
+    console.print(f"{'axis':10s}" + "".join(f"{r:>7s}" for r in roles))
+    for name in AXES:
+        console.print(f"{name:10s}" + "".join(f"{tables[r][name]:7.2f}" for r in roles))
+    console.print("\nbest per role:")
+    for r in roles:
+        console.print(f"  {r:6s} " + ", ".join(f"{n} {c:.2f}" for n, c in best_axes(tables[r])))
+    console.print("\nshared axes (candidates for one global dial):")
+    for n, cnt, med in shared_axes(tables)[:5]:
+        console.print(f"  {n:10s} {cnt}/{len(roles)} roles, median {med:.2f}")
+    out = cfg.workspace / "achievability.json"
+    out.write_text(json.dumps(tables, indent=1))
+    console.print(f"\n-> {out}")
+
+
+@app.command()
 def bench() -> None:
     """Render-throughput benchmark on this machine."""
     import time

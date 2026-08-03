@@ -370,13 +370,54 @@ now reports **per direction, at the endpoints**. Same mistake as the QC gate
 and the unstandardized descriptors — *check what a metric is actually
 averaging before believing it.*
 
+### C13g — Panel + registration DONE; one SDK gap blocks live audio
+
+Shipped:
+- **`TimbreGraphPanel.tsx`** — six always-visible tracks, the morph dial, and a
+  per-track link toggle. `paramsAt()` is the whole runtime: linear
+  interpolation between two verified snapshots. Dial writes are **coalesced**
+  (newest position wins while a write is in flight) so dragging cannot queue
+  stale parameter writes. A track that cannot follow the current direction
+  reads *holding*; unlinked reads *frozen*.
+- **CLI**: `tglab morph` (build the graph) and `tglab axes` (measure the
+  coupling policy).
+- **Registered in sas-app**: `file:` dep in `package.json`, import + builtin
+  entry in `src/plugins/index.ts` (`sortOrder: 10`, chat moved to 11), and
+  `DEFAULT_BUILTIN_PANEL_ORDER` in `LoopWorkstation.tsx`.
+  **`defaultEnabled: false`** — the panel needs a morph artifact built offline,
+  so opting in avoids a dead panel on first launch. sas-app typechecks clean.
+
+**⚠️ SDK gap — the panel cannot drive Surge yet.** Applying a snapshot needs a
+**by-name** parameter write, and the SDK exposes no per-parameter setter: only
+whole-state base64 (`setPluginState` / `setRawPluginState`). The engine *does*
+have `setPluginParameter(trackId, fxIndex, paramIndex, value)` — by **index**,
+not name — already used by `fx-tools.ts`. So the missing piece is one SDK
+method plus its host implementation, resolving names to indices:
+
+```ts
+setSynthParameters(trackId: string, params: Record<string, number>): Promise<void>
+```
+
+The panel declares it as an optional capability and degrades honestly (dial
+moves, status line explains the gap) rather than referencing an API that does
+not exist. Per the no-back-door rule, this must be added to
+`sas-plugin-sdk` + `plugin-host-impl.ts`, not worked around in the plugin.
+
+An alternative needing zero SDK change: have `tglab morph` capture Surge's
+**base64 state** at each control point and drive the panel through
+`setPluginState`. Rejected for now — a Surge state is ~50-200 KB, so nine
+points × six roles is ~10 MB per graph versus 44 KB today.
+
 ### What to build next
 
-1. Panel wiring: six tracks, dial, per-track unlink, reading this artifact.
-2. `tglab morph` CLI command wrapping `build_morph_graph`.
+1. **SDK `setSynthParameters`** + host impl (the blocker above).
+2. Multi-axis dial (X/Y): two axes solved independently and summed, then
+   render-verified — the single-axis case is proven, this is the extension.
 3. Cheaper achievability: 5.6 s per (role, axis) pair, so 3 shared axes across
    6 roles is ~100 s serial / ~20 s parallel — worth caching per preset.
-4. Multi-axis dials (X/Y) once one axis is proven in the panel.
+4. Kick-specific axis set is already covered by `tighter`/`punchier`/`boomier`;
+   a second graph on `tighter` measured median endpoint cosine **0.792**
+   (higher than `softer`, though fewer directions live).
 
 Semantic axes are defined in descriptor space (brighter / fuller / snappier /
 longer / rougher) — interpretable, role-agnostic to state, role-specific to
