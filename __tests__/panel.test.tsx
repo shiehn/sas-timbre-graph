@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import TimbreGraphPlugin, { timbreGraphManifest } from '../index';
-import { TimbreGraphPanel, paramsAt, reachableDirections } from '../TimbreGraphPanel';
+import { MorphSection, TimbreGraphPanel, paramsAt, reachableDirections } from '../TimbreGraphPanel';
 import pluginJson from '../plugin.json';
 
 describe('TimbreGraphPlugin registration surface', () => {
@@ -119,7 +119,7 @@ describe('TimbreGraphPanel rendering', () => {
 
   it('explains how to build a graph when none is loaded', () => {
     const { container, cleanup } = render(
-      createElement(TimbreGraphPanel, { host: {} } as never),
+      createElement(MorphSection, { host: {}, onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('No morph graph loaded');
     expect(container.textContent).toContain('tglab morph');
@@ -161,7 +161,7 @@ describe('TimbreGraphPanel rendering', () => {
     };
 
     const { container, cleanup } = render(
-      createElement(TimbreGraphPanel, { host } as never),
+      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
     );
     await act(async () => {
       await Promise.resolve();
@@ -191,7 +191,7 @@ describe('TimbreGraphPanel import flow', () => {
 
   it('offers an import affordance in the empty state', () => {
     const { container, cleanup } = render(
-      createElement(TimbreGraphPanel, { host: {} } as never),
+      createElement(MorphSection, { host: {}, onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('Import morph graph');
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
@@ -206,13 +206,11 @@ describe('TimbreGraphPanel import flow', () => {
       setProjectData: async (_k: string, v: string) => {
         savedGraph = v;
       },
-      createTrack: async ({ name, role }: { name: string; role: string }) => {
-        calls.push(`create:${role}`);
+      createTrack: async ({ name, role, loadSynth, synthName }: {
+        name: string; role: string; loadSynth?: boolean; synthName?: string;
+      }) => {
+        calls.push(`create:${role}:${loadSynth ? synthName : 'nosynth'}`);
         return { id: `engine-${role}`, name, dbId: `db-${role}` };
-      },
-      loadSynthPlugin: async (trackId: string, plugin: string) => {
-        calls.push(`surge:${trackId}:${plugin}`);
-        return 0;
       },
       applySurgeFxpPreset: async (trackId: string, fxp: string) => {
         calls.push(`fxp:${trackId}:${fxp.split('/').pop()}`);
@@ -236,21 +234,20 @@ describe('TimbreGraphPanel import flow', () => {
     });
 
     const { container, cleanup } = render(
-      createElement(TimbreGraphPanel, { host } as never),
+      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     Object.defineProperty(input, 'files', { value: [file] });
     await act(async () => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
-      // FileReader/text() + the async import chain need a couple of ticks
+      // FileReader + the async import chain need a couple of ticks
       await new Promise((r) => setTimeout(r, 0));
       await Promise.resolve();
     });
 
     expect(calls).toEqual([
-      'create:kick',
-      'surge:engine-kick:Surge XT',
+      'create:kick:Surge XT',
       'fxp:engine-kick:Kick 909ish.fxp',
     ]);
     expect(savedGraph).not.toBeNull();
@@ -267,7 +264,6 @@ describe('TimbreGraphPanel import flow', () => {
       createTrack: async ({ role }: { role: string }) => ({
         id: `engine-${role}`, name: role, dbId: role,
       }),
-      loadSynthPlugin: async () => 0,
       applySurgeFxpPreset: async () => {
         calls.push('fxp-attempted');
         throw new Error('FILE_NOT_FOUND');
@@ -288,7 +284,7 @@ describe('TimbreGraphPanel import flow', () => {
     };
     const file = new File([JSON.stringify(graph)], 'g.json');
     const { container, cleanup } = render(
-      createElement(TimbreGraphPanel, { host } as never),
+      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;

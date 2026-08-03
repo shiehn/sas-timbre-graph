@@ -10,6 +10,12 @@ module.exports = {
   // Resolve the SDK against the locally-installed (file:) copy.
   moduleNameMapper: {
     '^@signalsandsorcery/plugin-sdk$': '<rootDir>/node_modules/@signalsandsorcery/plugin-sdk',
+    // The SDK is a file: link with its own react copy; two Reacts in one
+    // renderer breaks hooks ("Cannot read properties of null (reading useRef)").
+    '^react$': '<rootDir>/node_modules/react',
+    '^react-dom$': '<rootDir>/node_modules/react-dom',
+    '^react-dom/(.*)$': '<rootDir>/node_modules/react-dom/$1',
+    '^react/jsx-runtime$': '<rootDir>/node_modules/react/jsx-runtime',
   },
   testPathIgnorePatterns: ['/node_modules/', '/dist/', '/training/'],
 };

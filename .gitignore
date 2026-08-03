@@ -13,3 +13,4 @@ __pycache__/
 
 # downloaded pod artifacts (shards, tarballs) — data, not source
 training/download/
+.DS_Store
