@@ -18,13 +18,23 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PluginHost, PluginUIProps } from '@signalsandsorcery/plugin-sdk';
+import type {
+  GeneratorPanelAdapter,
+  PluginHost,
+  PluginUIProps,
+} from '@signalsandsorcery/plugin-sdk';
 import {
   GeneratorPanelShell,
   useGeneratorPanelCore,
 } from '@signalsandsorcery/plugin-sdk';
 import { createTimbreGraphAdapter } from './src/timbre-graph-adapter';
-import { TIMBRE_ROLES, toTimbreRole, type TimbreRole } from './src/role-patterns';
+import {
+  APP_ROLE_TOKENS,
+  TIMBRE_ROLES,
+  toTimbreRole,
+  type TimbreRole,
+} from './src/role-patterns';
+import { TIMBRE_GROUP_META_KEY } from './src/timbre-group-meta';
 
 const ROLE_LABELS: Record<TimbreRole, string> = {
   kick: 'Kick',
@@ -106,15 +116,18 @@ export function reachableDirections(
 /** The morph section rendered above the standard track rows. Exported for tests. */
 export function MorphSection({
   host,
+  activeSceneId,
   onTracksChanged,
 }: {
   host: PluginHost;
+  activeSceneId: string | null;
   onTracksChanged: () => void;
 }) {
   const [graph, setGraph] = useState<MorphGraph | null>(null);
   const [control, setControl] = useState(0);
   const [linked, setLinked] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState('');
+  const [importProgress, setImportProgress] = useState<number | null>(null);
   const applying = useRef(false);
   const pending = useRef<number | null>(null);
 
@@ -165,15 +178,29 @@ export function MorphSection({
           setStatus('Not a morph graph: missing roles/control_points.');
           return;
         }
-        for (const role of Object.keys(parsed.roles)) {
+        const roleList = Object.keys(parsed.roles);
+        let groupId: string | null = null;
+        for (let i = 0; i < roleList.length; i++) {
+          const role = roleList[i];
           const t = parsed.roles[role];
-          setStatus(`Setting up ${role}…`);
+          setStatus(`Setting up ${role}… (${i + 1}/${roleList.length})`);
+          setImportProgress((i + 0.2) / roleList.length);
+          const timbre = toTimbreRole(role);
           const handle = await host.createTrack({
             name: `timbre-${role}`,
-            role,
+            role: timbre ? APP_ROLE_TOKENS[timbre] : role,
             loadSynth: true,
             synthName: 'Surge XT',
           });
+          groupId = groupId ?? handle.dbId;
+          if (activeSceneId) {
+            // same group seam the Add button uses — the six render as ONE group
+            await host.setSceneData(
+              activeSceneId,
+              `track:${handle.dbId}:${TIMBRE_GROUP_META_KEY}`,
+              { groupId, memberIndex: i, role: timbre ?? 'lead' },
+            );
+          }
           if (t.fxp_path && typeof host.applySurgeFxpPreset === 'function') {
             try {
               await host.applySurgeFxpPreset(handle.id, t.fxp_path);
@@ -184,17 +211,20 @@ export function MorphSection({
             }
           }
           t.track_id = handle.id;
+          setImportProgress((i + 1) / roleList.length);
         }
         await host.setProjectData?.(GRAPH_KEY, JSON.stringify(parsed));
         setGraph(parsed);
         setControl(0);
         setStatus('');
+        setImportProgress(null);
         onTracksChanged();
       } catch (err) {
         setStatus(err instanceof Error ? err.message : 'Import failed');
+        setImportProgress(null);
       }
     },
-    [host, onTracksChanged],
+    [host, activeSceneId, onTracksChanged],
   );
 
   const clearGraph = useCallback(async () => {
@@ -291,6 +321,22 @@ export function MorphSection({
             }}
           />
         </label>
+        {importProgress !== null && (
+          <div
+            data-testid="timbre-import-progress"
+            style={{
+              marginTop: 8, height: 4, borderRadius: 2,
+              background: 'rgba(127,127,127,0.2)', overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                width: `${Math.round(importProgress * 100)}%`, height: '100%',
+                background: '#2DD4BF', transition: 'width 200ms',
+              }}
+            />
+          </div>
+        )}
         {status && (
           <div style={{ marginTop: 8, color: '#d66', fontSize: 11 }}>{status}</div>
         )}
@@ -390,20 +436,26 @@ export function MorphSection({
 
 export function TimbreGraphPanel(props: PluginUIProps) {
   const adapter = useMemo(() => createTimbreGraphAdapter(props.host), [props.host]);
-  const core = useGeneratorPanelCore({ ui: props, adapter });
+  // Cast mirrors the bass panel: the core's option type is the unknown-meta
+  // erasure of the family-typed adapter.
+  const core = useGeneratorPanelCore({
+    ui: props,
+    adapter: adapter as GeneratorPanelAdapter,
+  });
 
   const slots = useMemo(
     () => ({
       beforeRows: (
         <MorphSection
           host={props.host}
+          activeSceneId={props.activeSceneId}
           onTracksChanged={() => void core.loadTracks()}
         />
       ),
     }),
     // core.loadTracks is referentially stable per panel-core's contract
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [props.host],
+    [props.host, props.activeSceneId],
   );
 
   return <GeneratorPanelShell core={core} slots={slots} />;

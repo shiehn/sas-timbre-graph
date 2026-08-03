@@ -19,6 +19,21 @@ export const TIMBRE_ROLES: readonly TimbreRole[] = [
   'kick', 'snare', 'hat', 'bass', 'pad', 'lead',
 ];
 
+/**
+ * Canonical app role token per timbre role — from the platform's
+ * instrument-classification taxonomy (plural percussion tokens, singular
+ * 'lead'/'bass'). Stamped on tracks at creation so the deterministic
+ * generation derives each track's pattern from its role with no typed prompt.
+ */
+export const APP_ROLE_TOKENS: Record<TimbreRole, string> = {
+  kick: 'kicks',
+  snare: 'snares',
+  hat: 'hats',
+  bass: 'bass',
+  pad: 'pads',
+  lead: 'lead',
+};
+
 /** (pitch, onsetBeat, lengthBeats, velocity) — mirrors probes.py `_events`. */
 type N = [number, number, number, number];
 

@@ -119,7 +119,7 @@ describe('TimbreGraphPanel rendering', () => {
 
   it('explains how to build a graph when none is loaded', () => {
     const { container, cleanup } = render(
-      createElement(MorphSection, { host: {}, onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('No morph graph loaded');
     expect(container.textContent).toContain('tglab morph');
@@ -161,7 +161,7 @@ describe('TimbreGraphPanel rendering', () => {
     };
 
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
     await act(async () => {
       await Promise.resolve();
@@ -191,7 +191,7 @@ describe('TimbreGraphPanel import flow', () => {
 
   it('offers an import affordance in the empty state', () => {
     const { container, cleanup } = render(
-      createElement(MorphSection, { host: {}, onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
     expect(container.textContent).toContain('Import morph graph');
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
@@ -211,6 +211,10 @@ describe('TimbreGraphPanel import flow', () => {
       }) => {
         calls.push(`create:${role}:${loadSynth ? synthName : 'nosynth'}`);
         return { id: `engine-${role}`, name, dbId: `db-${role}` };
+      },
+      setSceneData: async (sceneId: string, key: string, value: unknown) => {
+        const v = value as { groupId: string; memberIndex: number; role: string };
+        calls.push(`meta:${sceneId}:${key}:${v.memberIndex}:${v.role}`);
       },
       applySurgeFxpPreset: async (trackId: string, fxp: string) => {
         calls.push(`fxp:${trackId}:${fxp.split('/').pop()}`);
@@ -234,7 +238,7 @@ describe('TimbreGraphPanel import flow', () => {
     });
 
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -247,12 +251,13 @@ describe('TimbreGraphPanel import flow', () => {
     });
 
     expect(calls).toEqual([
-      'create:kick:Surge XT',
-      'fxp:engine-kick:Kick 909ish.fxp',
+      'create:kicks:Surge XT',                       // canonical app role token
+      'meta:scene-1:track:db-kicks:timbreGroup:0:kick', // group seam stamped
+      'fxp:engine-kicks:Kick 909ish.fxp',
     ]);
     expect(savedGraph).not.toBeNull();
     const stamped = JSON.parse(savedGraph as unknown as string);
-    expect(stamped.roles.kick.track_id).toBe('engine-kick');
+    expect(stamped.roles.kick.track_id).toBe('engine-kicks');
     cleanup();
   });
 
@@ -264,6 +269,7 @@ describe('TimbreGraphPanel import flow', () => {
       createTrack: async ({ role }: { role: string }) => ({
         id: `engine-${role}`, name: role, dbId: role,
       }),
+      setSceneData: async () => {},
       applySurgeFxpPreset: async () => {
         calls.push('fxp-attempted');
         throw new Error('FILE_NOT_FOUND');
@@ -284,7 +290,7 @@ describe('TimbreGraphPanel import flow', () => {
     };
     const file = new File([JSON.stringify(graph)], 'g.json');
     const { container, cleanup } = render(
-      createElement(MorphSection, { host, onTracksChanged: () => {} } as never),
+      createElement(MorphSection, { host, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
     await act(async () => Promise.resolve());
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -297,5 +303,48 @@ describe('TimbreGraphPanel import flow', () => {
     // panel proceeded to the loaded state despite the missing preset
     expect(container.textContent).toContain('Chord Pad');
     cleanup();
+  });
+});
+
+describe('group meta + role mapping', () => {
+  it('narrows valid meta and rejects garbage', () => {
+    const { asTimbreGroupMeta } = require('../src/timbre-group-meta');
+    expect(asTimbreGroupMeta({ groupId: 'g', memberIndex: 2, role: 'hat' }))
+      .toEqual({ groupId: 'g', memberIndex: 2, role: 'hat' });
+    // unknown role falls back to the member-index role
+    expect(asTimbreGroupMeta({ groupId: 'g', memberIndex: 3, role: 'zither' }))
+      .toEqual({ groupId: 'g', memberIndex: 3, role: 'bass' });
+    expect(asTimbreGroupMeta(null)).toBeNull();
+    expect(asTimbreGroupMeta({ memberIndex: 1 })).toBeNull();
+  });
+
+  it('group completeness requires the anchor', () => {
+    const { timbreGroupIsComplete } = require('../src/timbre-group-meta');
+    const member = (i: number) => ({ dbId: `d${i}`, meta: { groupId: 'g', memberIndex: i, role: 'kick' }, track: {} });
+    expect(timbreGroupIsComplete({ groupId: 'g', members: [member(0), member(3)] })).toBe(true);
+    expect(timbreGroupIsComplete({ groupId: 'g', members: [member(1), member(2)] })).toBe(false);
+  });
+
+  it('maps app role tokens to timbre roles and back (perc vocabulary)', () => {
+    const { APP_ROLE_TOKENS, toTimbreRole } = require('../src/role-patterns');
+    // the canonical taxonomy round-trips
+    for (const [timbre, token] of Object.entries(APP_ROLE_TOKENS)) {
+      expect(toTimbreRole(token as string)).toBe(timbre);
+    }
+    // and generation derives the pattern from the role with no typed prompt
+    expect(toTimbreRole('kicks')).toBe('kick');
+    expect(toTimbreRole('hats')).toBe('hat');
+    expect(toTimbreRole('vocals')).toBeNull();
+  });
+
+  it('tiles the role pattern across the scene and clips at the loop end', () => {
+    const { tiledPattern } = require('../src/role-patterns');
+    const twoBars = tiledPattern('kick', 2, 4);          // 8 beats = 2 tiles
+    expect(twoBars.length).toBe(10);                     // 5 hits per tile
+    expect(Math.max(...twoBars.map((n: { startBeat: number }) => n.startBeat))).toBeLessThan(8);
+    const odd = tiledPattern('pad', 1, 3);               // 3/4 bar: clipped tile
+    for (const n of odd) {
+      expect(n.startBeat + n.durationBeats).toBeLessThanOrEqual(3 + 1e-9);
+    }
   });
 });

@@ -13,6 +13,7 @@
  *   is the host's preset shuffle — both reused, not reimplemented.
  */
 
+import { createElement } from 'react';
 import type {
   GeneratorPanelAdapter,
   GenerationServices,
@@ -20,13 +21,28 @@ import type {
   LLMNoteResponse,
   PluginHost,
   PluginTrackHandle,
+  TrackCreatedContext,
 } from '@signalsandsorcery/plugin-sdk';
 import { createSurgeSoundAdapter } from '@signalsandsorcery/plugin-sdk';
-import { tiledPattern, toTimbreRole } from './role-patterns';
+import {
+  APP_ROLE_TOKENS,
+  TIMBRE_ROLES,
+  tiledPattern,
+  toTimbreRole,
+} from './role-patterns';
+import {
+  TIMBRE_GROUP_META_KEY,
+  timbreGroupIsComplete,
+  timbreGroupSpec,
+} from './timbre-group-meta';
+import { TimbreGroupRow } from './TimbreGroupRow';
+import type { TimbreGroupMeta } from './timbre-group-meta';
 
 const ACCENT = '#2DD4BF'; // teal — distinct from synth violet / bass amber
 
-export function createTimbreGraphAdapter(host: PluginHost): GeneratorPanelAdapter {
+export function createTimbreGraphAdapter(
+  host: PluginHost,
+): GeneratorPanelAdapter<TimbreGroupMeta> {
   return {
     identity: {
       familyKey: 'timbre-graph',
@@ -57,6 +73,41 @@ export function createTimbreGraphAdapter(host: PluginHost): GeneratorPanelAdapte
       // importTracks is off; nothing to do.
     },
 
+    /**
+     * "Add" means ADD A GROUP here. The core's add button creates ONE track
+     * and hands it to this hook — that track becomes the group's kick
+     * anchor, and the remaining five roles are created and stamped alongside
+     * it. The core reloads tracks afterwards, so the whole six-row group
+     * appears at once. Failures are non-fatal per the contract: whatever was
+     * created lands as plain rows and delete works normally.
+     */
+    async onTrackCreated(
+      handle: PluginTrackHandle,
+      ctx: TrackCreatedContext,
+    ): Promise<void> {
+      const groupId = handle.dbId;
+      await host.setTrackRole(handle.id, APP_ROLE_TOKENS.kick);
+      await host.setSceneData(
+        ctx.activeSceneId,
+        ctx.trackDataKey(handle.dbId, TIMBRE_GROUP_META_KEY),
+        { groupId, memberIndex: 0, role: 'kick' },
+      );
+      for (let i = 1; i < TIMBRE_ROLES.length; i++) {
+        const role = TIMBRE_ROLES[i];
+        const sibling = await host.createTrack({
+          name: `timbre-${role}`,
+          role: APP_ROLE_TOKENS[role],
+          loadSynth: true,
+          synthName: 'Surge XT',
+        });
+        await host.setSceneData(
+          ctx.activeSceneId,
+          ctx.trackDataKey(sibling.dbId, TIMBRE_GROUP_META_KEY),
+          { groupId, memberIndex: i, role },
+        );
+      }
+    },
+
     buildSystemPrompt(): string {
       // No LLM path in this family; required by the contract, never sent.
       return 'unused';
@@ -77,6 +128,15 @@ export function createTimbreGraphAdapter(host: PluginHost): GeneratorPanelAdapte
         return err instanceof Error && /no presets? available/i.test(err.message);
       },
     },
+
+    groupExtensions: [
+      {
+        ...timbreGroupSpec,
+        isComplete: timbreGroupIsComplete,
+        renderGroup: (group, ctx) =>
+          createElement(TimbreGroupRow, { group, ctx }),
+      },
+    ],
 
     generation: {
       /**
@@ -107,13 +167,19 @@ export function createTimbreGraphAdapter(host: PluginHost): GeneratorPanelAdapte
         const totalBeats = bars * beatsPerBar;
         const endTime = (totalBeats * 60) / bpm;
 
+        // Progress steps so the row's bar reflects real phases rather than
+        // only estimate pacing: context read -> pattern write -> done.
+        services.updateTrack(track.handle.id, { generationProgress: 0.3 });
         await services.host.writeMidiClip(track.handle.id, {
           startTime: 0,
           endTime,
           tempo: bpm,
           notes: tiledPattern(role, bars, beatsPerBar),
         });
-        services.updateTrack(track.handle.id, { hasMidi: true });
+        services.updateTrack(track.handle.id, {
+          hasMidi: true,
+          generationProgress: 1,
+        });
       },
     },
   };
