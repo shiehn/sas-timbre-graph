@@ -5,10 +5,11 @@
  * history, shuffle cycling, event wiring, render skeleton. This adapter
  * supplies only what genuinely differs here:
  *
- * - generation is DETERMINISTIC — no LLM. "Generate" writes the role's probe
- *   pattern (the same MIDI the training lab measured the patch with), so the
- *   panel is audible the moment tracks exist and the dial has something to
- *   morph.
+ * - generation goes through the SAME machinery as every other panel
+ *   (`host.generateWithLLM` with the scene's key/chords/siblings), but the
+ *   PROMPT IS DERIVED FROM THE ROLE rather than typed: a role is the request.
+ *   The training lab's probe pattern stays as the offline fallback, so a
+ *   failed or unreachable model still leaves audible, role-true MIDI.
  * - sounds are Surge states via the SDK's shared Surge sound adapter, and 🎲
  *   is the host's preset shuffle — both reused, not reimplemented.
  */
@@ -23,13 +24,27 @@ import type {
   PluginTrackHandle,
   TrackCreatedContext,
 } from '@signalsandsorcery/plugin-sdk';
-import { createSurgeSoundAdapter } from '@signalsandsorcery/plugin-sdk';
+import {
+  createSurgeSoundAdapter,
+  formatConcurrentTracks,
+  formatMusicalContext,
+  parseLLMNoteResponse,
+  panelClipEndSeconds,
+  panelMeter,
+  panelQuarterNotesPerBar,
+} from '@signalsandsorcery/plugin-sdk';
 import {
   APP_ROLE_TOKENS,
   TIMBRE_ROLES,
   toTimbreRole,
   variedPattern,
 } from './role-patterns';
+import {
+  buildTimbreSystemPrompt,
+  constrainNotes,
+  isPitched,
+  roleUserPrompt,
+} from './timbre-prompts';
 import {
   TIMBRE_GROUP_META_KEY,
   timbreGroupIsComplete,
@@ -57,13 +72,14 @@ export function createTimbreGraphAdapter(
       placeholderAccentColor: ACCENT,
       // six fixed roles + headroom for copies/experiments (host caps at 16)
       maxTracks: 12,
-      // deterministic pattern write — near-instant; keeps the bar honest
-      estimatedGenerationMs: 800,
+      // one LLM call per role, same order as the sibling panels
+      estimatedGenerationMs: 15000,
     },
     features: {
-      // Role-derived deterministic generation: no prompt, no LLM, no auth
-      // gate. Without this the core's generate handler silently no-ops on
-      // promptless rows (observed live: Generate All did nothing).
+      // The ROLE is the prompt, so rows carry no prompt text. Without this
+      // the core's generate handler gates on a non-empty prompt and silently
+      // no-ops (observed live: Generate All did nothing). Generation itself
+      // still goes through the LLM — this only waives the text box.
       promptlessGeneration: true,
       instrumentPicker: false,
       bulkComposePlaceholders: false,
@@ -135,13 +151,16 @@ export function createTimbreGraphAdapter(
       }
     },
 
-    buildSystemPrompt(): string {
-      // No LLM path in this family; required by the contract, never sent.
-      return 'unused';
+    /**
+     * Used by the transition path (the main generate() derives its own
+     * per-role prompt). No role is supplied here, so this covers the family.
+     */
+    buildSystemPrompt(_validRoles: readonly string[], timeSignature?: string): string {
+      return buildTimbreSystemPrompt('lead', timeSignature ?? '4/4');
     },
 
-    parseNotesResponse(): LLMNoteResponse | null {
-      return null;
+    parseNotesResponse(content: string): LLMNoteResponse | null {
+      return parseLLMNoteResponse(content);
     },
 
     sound: createSurgeSoundAdapter(host),
@@ -167,9 +186,19 @@ export function createTimbreGraphAdapter(
 
     generation: {
       /**
-       * Deterministic: write the role's probe pattern across the scene.
-       * The dial changes SOUND; this MIDI only makes the sound audible, and
-       * matches how the lab measured each patch.
+       * The same generation machinery every other panel uses — scene harmony
+       * context, `host.generateWithLLM`, deterministic validation — with the
+       * prompt DERIVED from the track's role instead of typed by the user.
+       *
+       * A role is the request: "kicks" means write a kick part. What the user
+       * shapes here is timbre (the dial), so a prompt box would be a second,
+       * redundant control. But the notes still have to fit the song, which
+       * means the model needs the key, the chords and the siblings — exactly
+       * what the bass and pad panels send.
+       *
+       * The offline probe pattern remains as the fallback: if the model is
+       * unreachable or returns nothing usable, the role still gets audible,
+       * role-true MIDI rather than an empty track.
        */
       async generate(
         track: GeneratorTrackState,
@@ -182,28 +211,69 @@ export function createTimbreGraphAdapter(
           );
         }
         const mc = await services.host.getMusicalContext();
-        const bars = mc.bars ?? 4;
-        const bpm = mc.bpm ?? 120;
-        const [num, den] = (mc.timeSignature ?? '4/4')
-          .split('/')
-          .map((v: string) => parseInt(v, 10));
-        const beatsPerBar =
-          Number.isFinite(num) && Number.isFinite(den) && den > 0
-            ? (num * 4) / den
-            : 4;
+        const bars = mc.bars > 0 ? mc.bars : 4;
+        const bpm = mc.bpm > 0 ? mc.bpm : 120;
+        const meter = panelMeter(mc);
+        const beatsPerBar = panelQuarterNotesPerBar(mc);
         const totalBeats = bars * beatsPerBar;
-        const endTime = (totalBeats * 60) / bpm;
+        const endTime = panelClipEndSeconds(mc);
 
-        // No progress reporting: there is no LLM in this path, so all six
-        // roles finish in ~180 ms total. A bar would paint AFTER the clip is
-        // already audible, which reads as "it generated before I asked".
+        // Sibling context: the other five roles of this group are being
+        // written in the same pass, so what matters is the rest of the scene.
+        let concurrentBlock = '';
+        try {
+          const genCtx = await services.host.getGenerationContext(track.handle.id);
+          concurrentBlock = formatConcurrentTracks(genCtx);
+        } catch {
+          /* sibling context is best-effort, never a gate */
+        }
+
+        const userPrompt = [
+          concurrentBlock,
+          concurrentBlock ? '' : null,
+          // Percussion has no harmony to follow; chords would be noise.
+          formatMusicalContext(mc, { includeChords: isPitched(role) }),
+          '',
+          `Write the ${roleUserPrompt(role)}.`,
+          `The clip is ${totalBeats} quarter-note beats long. Output the JSON.`,
+        ]
+          .filter((l) => l !== null)
+          .join('\n');
+
+        let notes = variedPattern(
+          role, bars, beatsPerBar, Math.floor(Math.random() * 0xffffffff),
+        );
+        try {
+          const llm = await services.host.generateWithLLM({
+            system: buildTimbreSystemPrompt(role, meter),
+            user: userPrompt,
+            responseFormat: 'json',
+          });
+          const parsed = parseLLMNoteResponse(llm.content);
+          const constrained = parsed
+            ? constrainNotes(parsed.notes, role, totalBeats)
+            : [];
+          if (constrained.length > 0) {
+            notes = constrained;
+          } else {
+            console.warn(
+              `[TimbreGraphPanel] ${role}: model returned no usable notes — using the probe pattern`,
+            );
+          }
+        } catch (err) {
+          // An offline or failing model must not leave a silent track.
+          console.warn(
+            `[TimbreGraphPanel] ${role}: generation failed (${
+              err instanceof Error ? err.message : String(err)
+            }) — using the probe pattern`,
+          );
+        }
+
         await services.host.writeMidiClip(track.handle.id, {
           startTime: 0,
           endTime,
           tempo: bpm,
-          // fresh seed per click: every Generate is a NEW role-true pattern
-          notes: variedPattern(role, bars, beatsPerBar,
-            Math.floor(Math.random() * 0xffffffff)),
+          notes,
         });
         services.updateTrack(track.handle.id, { hasMidi: true });
       },

@@ -716,7 +716,7 @@ describe('one failing role must not silence the others', () => {
   });
 });
 
-describe('generation is instant, so it reports no progress', () => {
+describe('generation reports no progress (the core paces the bar)', () => {
   const makeServices = (updates: Array<Record<string, unknown>>) => ({
     host: {
       getMusicalContext: async () => ({ bars: 4, bpm: 120, timeSignature: '4/4' }),
@@ -786,5 +786,143 @@ describe('generation is instant, so it reports no progress', () => {
         makeServices([]) as never,
       ),
     ).rejects.toThrow(/no timbre role/);
+  });
+});
+
+describe('generation uses the standard LLM machinery, prompt derived from role', () => {
+  const CHORDS = [
+    { symbol: 'Cm7', startQn: 0, endQn: 4 },
+    { symbol: 'Ab', startQn: 4, endQn: 8 },
+  ];
+
+  const musical = {
+    key: 'C', mode: 'minor', bpm: 120, bars: 4, genre: 'Techno',
+    timeSignature: '4/4', chordProgression: CHORDS,
+    contractPrompt: 'dark, driving',
+  };
+
+  const makeHost = (content: string) => ({
+    getMusicalContext: async () => musical,
+    getGenerationContext: async () => ({
+      chordProgression: { key: { tonic: 'C', mode: 'minor' }, chordsWithTiming: CHORDS, genre: null },
+      concurrentTracks: [],
+    }),
+    generateWithLLM: jest.fn(async () => ({ content })),
+    writeMidiClip: jest.fn(async () => undefined),
+  });
+
+  const services = (host: unknown) => ({
+    host,
+    updateTrack: () => {},
+  });
+
+  const track = (role: string) => ({
+    role,
+    handle: { id: 'e1', name: `timbre-${role}`, role },
+  });
+
+  const runFor = async (role: string, content: string) => {
+    const host = makeHost(content);
+    const adapter = createTimbreGraphAdapter({} as never);
+    await adapter.generation!.generate!(
+      track(role) as never,
+      services(host) as never,
+    );
+    const llmCalls = host.generateWithLLM.mock.calls as unknown as unknown[][];
+    const clipCalls = host.writeMidiClip.mock.calls as unknown as unknown[][];
+    const llmCall = llmCalls[0]?.[0] as { system: string; user: string } | undefined;
+    const clip = clipCalls[0]?.[1] as
+      | { notes: Array<{ pitch: number; startBeat: number; velocity: number }> }
+      | undefined;
+    return { host, llmCall, clip };
+  };
+
+  const NOTES = JSON.stringify({
+    notes: [
+      { pitch: 60, startBeat: 0, durationBeats: 1, velocity: 100 },
+      { pitch: 63, startBeat: 2, durationBeats: 1, velocity: 90 },
+    ],
+  });
+
+  it('calls the LLM — generation is not local pattern-stamping', async () => {
+    const { host } = await runFor('bass', NOTES);
+    expect(host.generateWithLLM).toHaveBeenCalledTimes(1);
+  });
+
+  it('derives the prompt from the role, with no user text', async () => {
+    const { llmCall } = await runFor('kicks', NOTES);
+    expect(llmCall!.user).toContain('kick drum');
+    // the panel has no prompt box; nothing should look like a quoted request
+    expect(llmCall!.user).not.toContain('User request');
+  });
+
+  it('sends the scene harmony so pitched roles generate in key', async () => {
+    const { llmCall } = await runFor('bass', NOTES);
+    expect(llmCall!.user).toContain('Key: C minor');
+    expect(llmCall!.user).toContain('Cm7 (beats 0-4)');
+    expect(llmCall!.user).toContain('BPM: 120');
+    // the scene contract is what carries production intent
+    expect(llmCall!.user).toContain('dark, driving');
+  });
+
+  it('omits chords for percussion — an unpitched part has no harmony', async () => {
+    const { llmCall } = await runFor('hats', NOTES);
+    expect(llmCall!.user).not.toContain('Chord Progression');
+    expect(llmCall!.user).toContain('Key: C minor'); // key/tempo still useful
+  });
+
+  it('pins percussion to the pitch the lab measured the patch at', async () => {
+    const { clip } = await runFor('kicks', NOTES);
+    // model asked for 60 and 63; a kick patch is only a kick at 36
+    expect(clip!.notes.every((n) => n.pitch === 36)).toBe(true);
+    expect(clip!.notes.length).toBe(2);
+  });
+
+  it('transposes pitched roles by whole octaves, preserving intervals', async () => {
+    const { clip } = await runFor('bass', NOTES);
+    const pitches = clip!.notes.map((n) => n.pitch);
+    // 60/63 shift as a phrase into the measured bass register [28,50]...
+    expect(pitches).toEqual([48, 51].map((p) => p - 12));
+    // ...and the rising minor third is still a rising minor third
+    expect(pitches[1] - pitches[0]).toBe(3);
+  });
+
+  it('never lets a phrase shift invert an interval', async () => {
+    const wide = JSON.stringify({
+      notes: [
+        { pitch: 40, startBeat: 0, durationBeats: 1, velocity: 100 },
+        { pitch: 47, startBeat: 1, durationBeats: 1, velocity: 100 },
+        { pitch: 52, startBeat: 2, durationBeats: 1, velocity: 100 },
+      ],
+    });
+    const { clip } = await runFor('lead', wide);
+    const pitches = clip!.notes.map((n) => n.pitch);
+    // strictly ascending in, strictly ascending out
+    expect(pitches[1]).toBeGreaterThan(pitches[0]);
+    expect(pitches[2]).toBeGreaterThan(pitches[1]);
+  });
+
+  it('falls back to the probe pattern when the model fails', async () => {
+    const host = {
+      ...makeHost(NOTES),
+      generateWithLLM: jest.fn(async () => {
+        throw new Error('offline');
+      }),
+    };
+    const adapter = createTimbreGraphAdapter({} as never);
+    await adapter.generation!.generate!(
+      track('leads') as never,
+      services(host) as never,
+    );
+    const clipCalls = host.writeMidiClip.mock.calls as unknown as unknown[][];
+    const clip = clipCalls[0]?.[1] as { notes: unknown[] };
+    // a failed model must never leave a silent track
+    expect(clip.notes.length).toBeGreaterThan(0);
+  });
+
+  it('falls back when the model returns unusable content', async () => {
+    const { clip, host } = await runFor('pads', 'I am not JSON');
+    expect(host.generateWithLLM).toHaveBeenCalled();
+    expect(clip!.notes.length).toBeGreaterThan(0);
   });
 });
