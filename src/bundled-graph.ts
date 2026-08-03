@@ -7,7 +7,7 @@
  * file IO, no packaging path to get wrong).
  *
  * Anchor presets are referenced by path RELATIVE to the Surge content root
- * ("Percussion/Kick 909ish.fxp"), which the host resolves against this
+ * ("Percussion/Kick Tech 2.fxp"), which the host resolves against this
  * machine's installed library — an absolute path from the authoring machine
  * would not exist anywhere else.
  */
