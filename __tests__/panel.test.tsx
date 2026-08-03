@@ -4,6 +4,7 @@ import { act } from 'react-dom/test-utils';
 import TimbreGraphPlugin, { timbreGraphManifest } from '../index';
 import { MorphSection, TimbreGraphPanel, paramsAt, reachableDirections } from '../TimbreGraphPanel';
 import pluginJson from '../plugin.json';
+import { createTimbreGraphAdapter } from '../src/timbre-graph-adapter';
 
 describe('TimbreGraphPlugin registration surface', () => {
   it('keeps class metadata in sync with plugin.json', () => {
@@ -497,7 +498,7 @@ describe('group rows hidden until generation', () => {
     cleanup();
   });
 
-  it('shows rows as soon as generation starts (progress bars visible)', () => {
+  it('shows rows as soon as generation starts', () => {
     const rendered: string[] = [];
     const { cleanup } = render(
       createElement(TimbreGroupRow, {
@@ -712,5 +713,78 @@ describe('one failing role must not silence the others', () => {
     expect(container.textContent).toContain('morph failed on');
     expect(container.textContent).toContain('kick');
     cleanup();
+  });
+});
+
+describe('generation is instant, so it reports no progress', () => {
+  const makeServices = (updates: Array<Record<string, unknown>>) => ({
+    host: {
+      getMusicalContext: async () => ({ bars: 4, bpm: 120, timeSignature: '4/4' }),
+      writeMidiClip: jest.fn(async () => undefined),
+    },
+    updateTrack: (_id: string, patch: Record<string, unknown>) => {
+      updates.push(patch);
+    },
+  });
+
+  const track = (role: string) => ({
+    role,
+    handle: { id: 'e1', name: `timbre-${role}`, role },
+  });
+
+  /**
+   * There is no LLM in this path — six roles finish in ~180 ms — so a bar
+   * would paint after the clip is already audible and read as "it generated
+   * before I asked". Locked in a test because the tempting fix to a
+   * fast-feeling operation is to add progress, not remove it.
+   */
+  it('never sets generationProgress', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const adapter = createTimbreGraphAdapter({} as never);
+    await adapter.generation!.generate!(
+      track('kicks') as never,
+      makeServices(updates) as never,
+    );
+    expect(updates.length).toBeGreaterThan(0);
+    for (const patch of updates) {
+      expect(patch).not.toHaveProperty('generationProgress');
+    }
+  });
+
+  it('still marks the row as having MIDI', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const adapter = createTimbreGraphAdapter({} as never);
+    await adapter.generation!.generate!(
+      track('kicks') as never,
+      makeServices(updates) as never,
+    );
+    expect(updates).toEqual([{ hasMidi: true }]);
+  });
+
+  it('writes exactly one clip, spanning the scene', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const services = makeServices(updates);
+    const adapter = createTimbreGraphAdapter({} as never);
+    await adapter.generation!.generate!(track('bass') as never, services as never);
+
+    expect(services.host.writeMidiClip).toHaveBeenCalledTimes(1);
+    const [trackId, clip] = services.host.writeMidiClip.mock.calls[0] as unknown as [
+      string,
+      { startTime: number; endTime: number; notes: unknown[] },
+    ];
+    expect(trackId).toBe('e1');
+    expect(clip.startTime).toBe(0);
+    expect(clip.endTime).toBeCloseTo(8, 5);   // 4 bars of 4/4 at 120 bpm
+    expect(clip.notes.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a track whose role is not a timbre role', async () => {
+    const adapter = createTimbreGraphAdapter({} as never);
+    await expect(
+      adapter.generation!.generate!(
+        track('vocals') as never,
+        makeServices([]) as never,
+      ),
+    ).rejects.toThrow(/no timbre role/);
   });
 });

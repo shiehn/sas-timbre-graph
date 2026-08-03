@@ -1,10 +1,9 @@
 /**
  * The Timbre Graph group row — six member tracks under one header.
  *
- * Header offers the group-level verbs: Generate All (each member's
- * deterministic role pattern, with the standard per-row progress bars),
- * collapse, and Remove Group (two-click confirm; deletes all member tracks
- * plus their group scene-data keys via the core's deleteGroup).
+ * Header offers the group-level verbs: Generate All (each member's role
+ * pattern), collapse, and Remove Group (two-click confirm; deletes all member
+ * tracks plus their group scene-data keys via the core's deleteGroup).
  *
  * Member rows are the shell's own TrackRows via `ctx.renderDefaultTrackRow`
  * — the ~50-prop plumbing stays in panel-core. Prompts are hidden: this
@@ -52,10 +51,10 @@ export function TimbreGroupRow({
 
   /**
    * Member rows stay hidden until generation has begun. Six visible empty
-   * tracks read as "press play" — and play nothing. Until there is MIDI (or
-   * bars actively filling), the group is a single header with one obvious
-   * next step; rows appear the moment Generate All starts so the progress
-   * bars are visible.
+   * tracks read as "press play" — and play nothing. Until there is MIDI, the
+   * group is a single header with one obvious next step. `isGenerating` is
+   * still part of the gate so the rows are present for the whole operation,
+   * however brief it is.
    */
   const materialized = group.members.some(
     (m) => m.track.hasMidi || m.track.isGenerating,

@@ -194,9 +194,9 @@ export function createTimbreGraphAdapter(
         const totalBeats = bars * beatsPerBar;
         const endTime = (totalBeats * 60) / bpm;
 
-        // Progress steps so the row's bar reflects real phases rather than
-        // only estimate pacing: context read -> pattern write -> done.
-        services.updateTrack(track.handle.id, { generationProgress: 0.3 });
+        // No progress reporting: there is no LLM in this path, so all six
+        // roles finish in ~180 ms total. A bar would paint AFTER the clip is
+        // already audible, which reads as "it generated before I asked".
         await services.host.writeMidiClip(track.handle.id, {
           startTime: 0,
           endTime,
@@ -205,10 +205,7 @@ export function createTimbreGraphAdapter(
           notes: variedPattern(role, bars, beatsPerBar,
             Math.floor(Math.random() * 0xffffffff)),
         });
-        services.updateTrack(track.handle.id, {
-          hasMidi: true,
-          generationProgress: 1,
-        });
+        services.updateTrack(track.handle.id, { hasMidi: true });
       },
     },
   };
