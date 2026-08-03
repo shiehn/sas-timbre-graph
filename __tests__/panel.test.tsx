@@ -437,3 +437,73 @@ describe('dial drives LIVE tracks, not stamped ids', () => {
     cleanup();
   });
 });
+
+describe('group rows hidden until generation', () => {
+  const { TimbreGroupRow } = require('../src/TimbreGroupRow') as {
+    TimbreGroupRow: React.ComponentType<Record<string, unknown>>;
+  };
+
+  function makeCtx(rendered: string[]) {
+    return {
+      collapsed: false,
+      onToggleCollapse: () => {},
+      handlers: { generate: () => {} },
+      deleteGroup: async () => {},
+      renderDefaultTrackRow: (t: { handle: { id: string } }) => {
+        rendered.push(t.handle.id);
+        return null;
+      },
+    };
+  }
+  const member = (id: string, hasMidi: boolean, isGenerating = false) => ({
+    dbId: `db-${id}`,
+    meta: { groupId: 'g', memberIndex: 0, role: 'kick' },
+    track: { handle: { id }, hasMidi, isGenerating },
+  });
+
+  function render(el: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(el));
+    return { container, cleanup: () => { act(() => root.unmount()); container.remove(); } };
+  }
+
+  it('shows a single CTA and NO member rows before any MIDI exists', () => {
+    const rendered: string[] = [];
+    const { container, cleanup } = render(
+      createElement(TimbreGroupRow, {
+        group: { groupId: 'g', members: [member('a', false), member('b', false)] },
+        ctx: makeCtx(rendered),
+      }),
+    );
+    expect(rendered).toEqual([]);                    // no rows to "press play" on
+    expect(container.textContent).toContain('Generate All');
+    expect(container.querySelector('[data-testid="timbre-group-unmaterialized"]')).not.toBeNull();
+    cleanup();
+  });
+
+  it('shows rows as soon as generation starts (progress bars visible)', () => {
+    const rendered: string[] = [];
+    const { cleanup } = render(
+      createElement(TimbreGroupRow, {
+        group: { groupId: 'g', members: [member('a', false, true), member('b', false)] },
+        ctx: makeCtx(rendered),
+      }),
+    );
+    expect(rendered).toEqual(['a', 'b']);
+    cleanup();
+  });
+
+  it('shows rows once MIDI exists', () => {
+    const rendered: string[] = [];
+    const { cleanup } = render(
+      createElement(TimbreGroupRow, {
+        group: { groupId: 'g', members: [member('a', true), member('b', true)] },
+        ctx: makeCtx(rendered),
+      }),
+    );
+    expect(rendered).toEqual(['a', 'b']);
+    cleanup();
+  });
+});

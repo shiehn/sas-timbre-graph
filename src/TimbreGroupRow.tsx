@@ -50,6 +50,17 @@ export function TimbreGroupRow({
 
   const anyGenerating = group.members.some((m) => m.track.isGenerating);
 
+  /**
+   * Member rows stay hidden until generation has begun. Six visible empty
+   * tracks read as "press play" — and play nothing. Until there is MIDI (or
+   * bars actively filling), the group is a single header with one obvious
+   * next step; rows appear the moment Generate All starts so the progress
+   * bars are visible.
+   */
+  const materialized = group.members.some(
+    (m) => m.track.hasMidi || m.track.isGenerating,
+  );
+
   return (
     <div data-testid="timbre-group-row">
       <div
@@ -112,11 +123,21 @@ export function TimbreGroupRow({
           </button>
         )}
       </div>
-      {!ctx.collapsed &&
+      {!materialized ? (
+        <div
+          data-testid="timbre-group-unmaterialized"
+          style={{ padding: '8px 12px', fontSize: 12, opacity: 0.7 }}
+        >
+          {group.members.length} tracks ready — press <b>Generate All</b> to
+          write their patterns and hear them.
+        </div>
+      ) : (
+        !ctx.collapsed &&
         group.members.map((m) =>
           // Prompts hidden: generation is role-derived, nothing to type.
           ctx.renderDefaultTrackRow(m.track, { onPromptChange: undefined }),
-        )}
+        )
+      )}
     </div>
   );
 }
