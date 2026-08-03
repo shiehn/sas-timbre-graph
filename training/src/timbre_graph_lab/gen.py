@@ -33,6 +33,38 @@ from timbre_graph_lab.worker import RenderWorker, qc_audio
 # classically audible groups go first.
 SCREEN_CAP = 120
 TOP_K_SENSITIVE = 24
+
+# Parameters perturbed on EVERY anchor, whatever the sensitivity screen says.
+#
+# Without this, each anchor contributed only its own top-24 params and the
+# supports barely overlapped: measured on the v1 corpus, 228/350 parameters
+# were never perturbed by ANY anchor, only 13 by more than half of them, and
+# two same-role anchors shared a median of 8 of 24 (Jaccard 0.205). Training
+# data was therefore a patchwork of near-disjoint 24-dim slices of a 350-dim
+# space — which is exactly why a local model transferred to its nearest
+# neighbour scored 0.000 while its own anchor scored 0.5-0.64. Column
+# alignment across anchors is a prerequisite for learning anything global.
+CORE_PATTERNS = (
+    "filter_1_cutoff", "filter_2_cutoff",
+    "filter_1_resonance", "filter_2_resonance",
+    "filter_balance", "highpass",
+    "filter_1_feg_mod_amount", "filter_2_feg_mod_amount",
+    "amp_eg_attack", "amp_eg_decay", "amp_eg_sustain", "amp_eg_release",
+    "filter_eg_attack", "filter_eg_decay", "filter_eg_sustain",
+    "filter_eg_release",
+    "noise_color", "feedback", "waveshaper_drive",
+    "lfo_1_amplitude", "lfo_1_rate", "lfo_2_amplitude", "lfo_2_rate",
+    "osc_1_level", "osc_2_level", "osc_3_level",
+    "unison_detune", "portamento", "vca_level", "width",
+)
+
+
+def core_params(allowed: list[str], baseline: dict[str, float]) -> list[str]:
+    """Resolve CORE_PATTERNS against this host's actual allow-list."""
+    return [
+        p for p in allowed
+        if p in baseline and any(tok in p.lower() for tok in CORE_PATTERNS)
+    ]
 _PRIORITY = ("cutoff", "resonance", "env", "attack", "decay", "sustain", "release",
              "shape", "width", "level", "balance", "feedback", "drive", "lfo")
 
@@ -202,10 +234,17 @@ def process_anchor(job: dict) -> dict:
             "snr_floor": round(float(snr_floor), 4),
             "best_response": round(float(max(deltas)) if deltas else 0.0, 4),
         }
+    # Union with the shared core so every anchor exercises the same columns —
+    # per-anchor winners alone produced near-disjoint supports (see
+    # CORE_PATTERNS). Core params that are measurably dead on THIS patch are
+    # still included: "this control does nothing here" is real, learnable
+    # signal, and excluding it is what made supports anchor-specific.
+    core = core_params(policy["allowed"], baseline)
+    perturb_set = list(dict.fromkeys(sensitive + core))
 
     # --- gesture plan ---
     plan = build_plan(
-        preset_id, role, sensitive,
+        preset_id, role, perturb_set,
         n_singles=n_singles, n_multis=n_multis, n_drift_chains=n_drift, seed=SEED,
     )
 
@@ -275,6 +314,7 @@ def process_anchor(job: dict) -> dict:
     return {
         "preset_id": preset_id, "role": role, "status": "ok",
         "n_samples": len(X0), "n_rejected": n_bad,
+        "n_params": len(perturb_set), "n_core": len(core),
         "median_snr": round(med_snr, 2),
         "seconds": round(time.time() - t0, 1),
     }

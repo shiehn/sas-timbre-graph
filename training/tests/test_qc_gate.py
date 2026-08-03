@@ -94,3 +94,88 @@ def test_crest_factor_is_level_invariant():
     zh = extract_descriptors(_decaying_tone(3.5), SR)
     i = DESCRIPTOR_NAMES.index("crest_db")
     assert abs(float(zh[i]) - float(zq[i])) < 0.1
+
+
+# --- parameter policy: switches must not be treated as continuous ----------
+
+class _FakeParam:
+    """Mimics pedalboard: num_steps/is_boolean lie, range is often unreported."""
+
+    def __init__(self, rng, displays):
+        self.range = rng
+        self.num_steps = 2147483647
+        self.is_boolean = False
+        self._displays = displays
+        self.raw_value = 0.0
+
+    @property
+    def string_value(self):
+        idx = min(int(self.raw_value * (len(self._displays) - 1) + 0.5),
+                  len(self._displays) - 1)
+        return self._displays[idx]
+
+
+def test_declared_boolean_is_discrete():
+    from timbre_graph_lab.policy import _is_discrete
+    assert _is_discrete(_FakeParam((False, True, 1), ["Off", "On"]))
+
+
+def test_continuous_with_unreported_range_is_allowed():
+    """Envelope stages report range (None,None,None) but sweep numerically."""
+    from timbre_graph_lab.policy import _is_discrete
+    eg = _FakeParam((None, None, None),
+                    ["0.0 ms", "12.3 ms", "37.2 ms", "353.6 ms", "8.00 s"])
+    assert not _is_discrete(eg)
+
+
+def test_continuous_with_reported_range_is_allowed():
+    from timbre_graph_lab.policy import _is_discrete
+    cutoff = _FakeParam((13.75, 25087.71, None),
+                        ["13.75 Hz", "89.87 Hz", "587.33 Hz",
+                         "3.84 kHz", "25.09 kHz"])
+    assert not _is_discrete(cutoff)
+
+
+def test_negative_numeric_display_is_continuous():
+    from timbre_graph_lab.policy import _is_discrete
+    feg = _FakeParam((None, None, None),
+                     ["-96.00 semitones", "-48.00 semitones", "0.00 semitones",
+                      "48.00 semitones", "96.00 semitones"])
+    assert not _is_discrete(feg)
+
+
+def test_enum_with_many_distinct_text_values_is_discrete():
+    """filter_configuration sweeps 5 DISTINCT values — but they are labels."""
+    from timbre_graph_lab.policy import _is_discrete
+    cfg = _FakeParam((None, None, None),
+                     ["Serial 1", "Serial 2", "Serial 3", "Dual 1", "Dual 2"])
+    assert _is_discrete(cfg)
+
+
+def test_routing_enum_is_discrete():
+    from timbre_graph_lab.policy import _is_discrete
+    route = _FakeParam((None, None, None),
+                       ["Filter 1", "Filter 1", "Both", "Filter 2", "Filter 2"])
+    assert _is_discrete(route)
+
+
+def test_switch_names_are_denied():
+    from timbre_graph_lab.policy import _denied
+    for n in ("a_osc_1_mute", "a_noise_solo", "a_osc_2_route",
+              "a_osc_1_retrigger", "a_master_volume"):
+        assert _denied(n), n
+    for n in ("a_filter_1_cutoff", "a_amp_eg_release", "a_highpass"):
+        assert not _denied(n), n
+
+
+def test_core_params_resolve_and_are_shared_across_anchors():
+    """Every anchor must exercise the same core columns (Jaccard was 0.205)."""
+    from timbre_graph_lab.gen import core_params
+    allowed = ["a_filter_1_cutoff", "a_amp_eg_release", "a_highpass",
+               "a_noise_color", "a_some_obscure_thing"]
+    base_a = {p: 0.5 for p in allowed}
+    base_b = {p: 0.4 for p in allowed}
+    ca, cb = core_params(allowed, base_a), core_params(allowed, base_b)
+    assert ca == cb                       # identical across anchors
+    assert "a_filter_1_cutoff" in ca and "a_highpass" in ca
+    assert "a_some_obscure_thing" not in ca

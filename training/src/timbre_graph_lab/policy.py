@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 from pathlib import Path
 
 from timbre_graph_lab.config import POLICY_VERSION, LabConfig
@@ -38,6 +39,14 @@ DENY_PATTERNS = [
     "*pitch*",             # coarse pitch: same reason (fine detune is allowed)
     "*keytrack*",
     "*unison_voices*",     # voice-count is steppy/clicky live
+    # Structural switches. These leaked into the v1 allow-list and then
+    # DOMINATED the sensitivity screen, because flipping a mute or a routing
+    # switch produces a far bigger descriptor delta than any continuous
+    # timbre move — crowding real parameters out of the per-anchor budget.
+    "*mute*",
+    "*solo*",
+    "*route*",
+    "*retrigger*",         # also fights the frozen-phase determinism convention
 ]
 
 ALLOW_EXCEPTIONS = [
@@ -58,6 +67,51 @@ def _denied(name: str) -> bool:
     return any(fnmatch.fnmatch(lname, pat) for pat in DENY_PATTERNS)
 
 
+_NUMERIC_DISPLAY = re.compile(r"^\s*[-+]?(\d+\.?\d*|\.\d+)")
+_SWEEP = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _is_discrete(param) -> bool:
+    """Decide continuity by PROBING the parameter, not by trusting metadata.
+
+    Every metadata signal on this surface lies: pedalboard reports
+    `num_steps = 2147483647` and `is_boolean = False` for every Surge
+    parameter (so the v1 test never fired and 21 switches were treated as
+    continuous), while `range` is unreported — `(None, None, None)` — for
+    plenty of genuinely continuous controls including every envelope stage
+    (rejecting on that basis threw away amp/filter EG attack, decay, release).
+
+    Sweeping raw 0->1 and reading the display string is unambiguous:
+
+        cutoff   -> '13.75 Hz', '89.87 Hz', ...   5 distinct, numeric
+        eg_attack-> '0.0 ms', '37.2 ms', ...      5 distinct, numeric
+        mute     -> 'Off', 'On'                   2 distinct, text
+        route    -> 'Filter 1', 'Both'            3 distinct, text
+        filter_configuration -> 'Serial 1', 'Dual 2'  5 distinct, TEXT
+
+    So: continuous iff the sweep yields many distinct values AND every one of
+    them reads as a number. The last example is why distinctness alone is not
+    enough.
+    """
+    rng = getattr(param, "range", None)
+    if rng is not None:
+        t = tuple(rng)
+        if len(t) >= 2 and isinstance(t[0], bool) and isinstance(t[1], bool):
+            return True  # declared boolean switch
+    try:
+        saved = param.raw_value
+        seen = []
+        for r in _SWEEP:
+            param.raw_value = r
+            seen.append(str(getattr(param, "string_value", "")))
+        param.raw_value = saved
+    except Exception:
+        return True  # unprobeable -> keep it out of the live-safe set
+    if len(set(seen)) < 4:
+        return True
+    return not all(_NUMERIC_DISPLAY.match(v) for v in seen)
+
+
 def build_policy(worker: RenderWorker) -> dict:
     """Introspect the live host and produce the policy dict."""
     plugin = worker.host._plugin  # noqa: SLF001 — introspection by design
@@ -69,23 +123,13 @@ def build_policy(worker: RenderWorker) -> dict:
         if lname.startswith(SCENE_PREFIX_DENY):
             excluded[name] = "scene-b"
             continue
-        # String-valued / stepped params are discrete: skip structurally.
-        try:
-            n_steps = getattr(param, "num_steps", None)
-            valid_str = getattr(param, "string_value", None)
-        except Exception:
-            n_steps, valid_str = None, None
-        is_discrete = bool(getattr(param, "is_boolean", False))
-        if n_steps is not None and 0 < n_steps <= 32:
-            is_discrete = True
-        if is_discrete:
+        if _is_discrete(param):
             excluded[name] = "discrete"
             continue
         if _denied(name):
             excluded[name] = "deny-list"
             continue
         allowed.append(name)
-        _ = valid_str  # introspection only
 
     return {
         "policy_version": POLICY_VERSION,

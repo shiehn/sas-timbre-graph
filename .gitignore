@@ -10,3 +10,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# downloaded pod artifacts (shards, tarballs) — data, not source
+training/download/
