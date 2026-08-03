@@ -273,15 +273,64 @@ axis library and record what it can express. The dial then drives every role
 along its own best axis, which is what makes one control produce six coherent
 moves instead of five wrong ones.
 
+### C13e — Axis library + the complete measured coupling policy
+
+The kick declining every spectral axis was diagnosed, not worked around. Its
+Jacobian shows **0.000 reach in `band_high` and `band_air`** — "brighter" is
+physically impossible for it, not merely hard. Its expressive dimensions are
+envelope and dynamics. A second cause was sign coupling: the original `longer`
+axis paired `decay_slope+` with `attack_time+`, while the kick's own reachable
+direction pairs `decay_slope+` with `attack_time-`, so the request was
+unreachable even though both components move individually.
+
+`axes.py` now holds a named axis library (spectral / envelope / dynamics /
+texture) plus `achievability()`, which render-verifies each axis per anchor.
+The library is deliberately redundant — `longer` and `boomier` differ only in
+that attack sign — because measurement, not taste, picks the winner.
+
+**Full matrix, render-verified (0.00 = declined), 6 roles × 9 axes, 301 s:**
+
+| axis | kick | snare | hat | bass | pad | lead |
+|---|---|---|---|---|---|---|
+| brighter | 0.00 | 0.00 | 0.37 | 0.00 | 0.46 | 0.45 |
+| fuller | 0.00 | 0.00 | 0.00 | 0.00 | 0.44 | 0.45 |
+| wider | 0.00 | 0.69 | 0.60 | 0.39 | 0.76 | **0.79** |
+| longer | 0.71 | **0.84** | 0.54 | 0.00 | 0.00 | 0.73 |
+| boomier | 0.66 | 0.00 | **0.81** | 0.00 | 0.00 | 0.00 |
+| tighter | **0.81** | **0.86** | 0.69 | 0.61 | **0.83** | 0.00 |
+| punchier | **0.81** | 0.00 | 0.00 | **0.72** | 0.51 | **0.84** |
+| softer | 0.75 | 0.82 | 0.63 | 0.56 | 0.76 | 0.71 |
+| rougher | 0.00 | 0.00 | 0.00 | 0.60 | 0.68 | 0.00 |
+
+The kick went from declining all four original axes to **0.66-0.81 on four**.
+Every role now has at least three axes above 0.40.
+
+**A single dial is viable.** Axes ranked by how many roles can express them:
+
+| axis | roles | median cosine |
+|---|---|---|
+| **softer** | **6 / 6** | 0.73 |
+| tighter | 5 / 6 | 0.81 |
+| punchier | 4 / 6 | 0.76 |
+| wider | 4 / 6 | 0.73 |
+| longer | 4 / 6 | 0.72 |
+
+`softer` moves all six coherently; `tighter` moves five at 0.81. So the
+unlabeled dial has real, measured backing — and where a role cannot follow it
+holds still rather than misbehaving.
+
+Spectral axes are the weak ones (percussion cannot reach them at all), which
+inverts the intuition the proposal started from: **the ensemble couples through
+envelope and dynamics, not brightness.**
+
 ### What to build next
 
-1. **Axis achievability at probe time** → emit the coupling table above
-   automatically as part of the response set.
-2. **Morph-graph artifact**: sweep the dial, refine at each control point,
+1. **Morph-graph artifact**: sweep a shared axis, refine at each control point,
    store per-role parameter snapshots (the plugin then only interpolates).
-3. Panel wiring: six tracks, dial, per-track unlink.
-4. Kick needs its own axes (click / pitch / body) — the spectral ones are
-   inexpressible for it.
+2. Panel wiring: six tracks, dial, per-track unlink.
+3. Cheaper achievability: 5.6 s per (role, axis) pair means testing 3 shared
+   axes across 6 roles costs ~100 s serial, ~20 s in parallel — fine on
+   anchor selection, worth caching per preset.
 
 Semantic axes are defined in descriptor space (brighter / fuller / snappier /
 longer / rougher) — interpretable, role-agnostic to state, role-specific to
