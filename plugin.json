@@ -9,7 +9,7 @@
   "author": "Steve Hiehn",
   "icon": "icon.svg",
   "minHostVersion": "2.0.0",
-  "builtIn": false,
+  "builtIn": true,
   "capabilities": {
     "requiresLLM": false,
     "requiresSurgeXT": true
