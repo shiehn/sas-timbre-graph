@@ -299,10 +299,12 @@ export function MorphSection({
         style={{ padding: '10px 12px', fontSize: 12, lineHeight: 1.5 }}
       >
         <div style={{ opacity: 0.8, marginBottom: 8 }}>
-          No morph graph loaded. Build one with the training lab
-          (<code>tglab probe</code>, then <code>tglab morph --axis softer</code>),
-          then import it — that creates the six tracks with their measured
-          anchor presets. Press each track&apos;s Generate to hear it.
+          <b>Add Graph</b> creates the six-track group (kick, snare, hat,
+          bass, pad, lead) — then <b>Generate All</b> on the group to hear
+          it. To enable the morph dial, import a graph built by the training
+          lab (<code>tglab probe</code>, then{' '}
+          <code>tglab morph --axis softer</code>) — importing also sets up the
+          tracks with their measured anchor presets.
         </div>
         <label
           style={{

@@ -121,7 +121,8 @@ describe('TimbreGraphPanel rendering', () => {
     const { container, cleanup } = render(
       createElement(MorphSection, { host: {}, activeSceneId: 'scene-1', onTracksChanged: () => {} } as never),
     );
-    expect(container.textContent).toContain('No morph graph loaded');
+    expect(container.textContent).toContain('Add Graph');
+    expect(container.textContent).toContain('Generate All');
     expect(container.textContent).toContain('tglab morph');
     cleanup();
   });

@@ -48,6 +48,8 @@ export function createTimbreGraphAdapter(
       familyKey: 'timbre-graph',
       familyLabel: 'Timbre Graph',
       trackNamePrefix: 'timbre',
+      // The unit of creation here is the GROUP — one click makes six tracks.
+      addTrackLabel: 'Add Graph',
       logTag: 'TimbreGraphPanel',
       accentColor: ACCENT,
       transitionAccentColor: ACCENT,
