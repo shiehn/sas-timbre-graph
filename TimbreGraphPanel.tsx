@@ -283,6 +283,10 @@ export function MorphSection({
         return;
       }
       applying.current = true;
+      // Per-role isolation. A single try around the whole loop meant one
+      // role's failure aborted every role after it — and `lead` is last in
+      // role order, so ANY earlier error made it look permanently dead.
+      const failures: string[] = [];
       try {
         let wrote = 0;
         for (const role of Object.keys(graph.roles)) {
@@ -321,13 +325,27 @@ export function MorphSection({
             return;
           }
           for (const id of targets) {
-            await host.setSynthParameters(id, params, 0, { relative: true });
-            wrote += 1;
+            try {
+              await host.setSynthParameters(id, params, 0, { relative: true });
+              wrote += 1;
+            } catch (err) {
+              // Log per failure so it is diagnosable in renderer-logs, and
+              // keep going: the other five synths must still morph.
+              failures.push(role);
+              console.error(
+                `[TimbreGraph] morph write failed role=${role} track=${id}`,
+                err,
+              );
+            }
           }
         }
-        setStatus(wrote === 0
-          ? 'No live tracks to drive — Add Graph first, then move the dial.'
-          : '');
+        if (wrote === 0) {
+          setStatus('No live tracks to drive — Add Graph first, then move the dial.');
+        } else if (failures.length > 0) {
+          setStatus(`morph failed on: ${[...new Set(failures)].join(', ')}`);
+        } else {
+          setStatus('');
+        }
       } catch (err) {
         setStatus(err instanceof Error ? err.message : 'could not apply parameters');
       } finally {

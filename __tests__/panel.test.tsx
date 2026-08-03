@@ -601,3 +601,73 @@ describe('the plugin ships with a usable graph', () => {
     expect(BUNDLED_GRAPH.control_points).toContain(0);
   });
 });
+
+describe('one failing role must not silence the others', () => {
+  /**
+   * A single try around the whole role loop meant the first throw aborted
+   * every remaining role — and `lead` iterates LAST, so any earlier error
+   * (e.g. a wrongly-adopted track rejecting a parameter) made the lead look
+   * permanently dead. Live symptom: "the lead synth has still never changed".
+   */
+  function render(el: React.ReactElement) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(el));
+    return { container, cleanup: () => { act(() => root.unmount()); container.remove(); } };
+  }
+
+  const roleTrack = (role: string) => ({
+    role, preset_id: role, name: role,
+    param_names: ['a'], baseline: [0.5],
+    snapshots: [[0.4], [0.5], [0.6]], cosine: [1, 1, 1], declined: false,
+  });
+
+  it('still writes later roles after an earlier role throws', async () => {
+    const written: string[] = [];
+    const graph = {
+      version: 'morph-graph-v1',
+      axis: { name: 'softer', vector: [] },
+      control_points: [-1, 0, 1],
+      roles: {
+        kick: roleTrack('kick'),
+        pad: roleTrack('pad'),
+        lead: roleTrack('lead'),   // last in order: the canary
+      },
+    };
+    const host = {
+      getProjectData: async (k: string) => (k.endsWith('morph') ? graph : null),
+      setProjectData: async () => {},
+      setSynthParameters: async (trackId: string) => {
+        if (trackId === 'track-kick') throw new Error('Unknown parameter(s)');
+        written.push(trackId);
+      },
+    };
+    const { container, cleanup } = render(
+      createElement(MorphSection, {
+        host, activeSceneId: 's1',
+        resolveTrackIds: (role: string) => [`track-${role}`],
+        onTracksChanged: () => {},
+      } as never),
+    );
+    await act(async () => Promise.resolve());
+    const slider = container.querySelector('input[type="range"]') as HTMLInputElement;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value',
+      )?.set;
+      set?.call(slider, '0.9');
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // kick failed, but pad AND lead were still driven
+    expect(written).toContain('track-pad');
+    expect(written).toContain('track-lead');
+    expect(written).not.toContain('track-kick');
+    // and the failure is surfaced, not swallowed
+    expect(container.textContent).toContain('morph failed on');
+    expect(container.textContent).toContain('kick');
+    cleanup();
+  });
+});
