@@ -89,6 +89,29 @@ function readGroupConfig(groupId: string): {
 }
 
 /**
+ * Restore every group's mode from scene data.
+ *
+ * Without this the cache is write-only and the durable copy is never read, so
+ * reopening a project showed a layered group as `ensemble`: the pad still drove
+ * each track through its own lens (that comes from the members' own meta), but
+ * the dropdown lied and Generate would write six competing parts instead of
+ * one. Called from the panel's scene-data effect, which already has the blob.
+ */
+export function primeGroupConfigs(sceneData: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(sceneData ?? {})) {
+    if (!key.endsWith(`:${TIMBRE_GROUP_CONFIG_KEY}`)) continue;
+    const cfg = asTimbreGroupConfig(value);
+    if (!cfg) continue;
+    // key shape: group:<groupId>:timbreGroupConfig
+    const parts = key.split(':');
+    const groupId = parts.length >= 3 ? parts[1] : null;
+    if (groupId) {
+      groupConfigCache.set(groupId, { mode: cfg.mode, layerRole: cfg.role });
+    }
+  }
+}
+
+/**
  * Switch a group between ensemble and layered.
  *
  * Layered means every member plays the SAME role and the same part, differing

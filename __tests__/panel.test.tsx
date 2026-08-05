@@ -1386,3 +1386,66 @@ describe('layered groups generate ONE part, not six', () => {
     b.cleanup();
   });
 });
+
+describe('a layered group survives reopening the project', () => {
+  const { primeGroupConfigs } = require('../src/timbre-graph-adapter');
+  const { TimbreGroupRow } = require('../src/TimbreGroupRow') as {
+    TimbreGroupRow: React.ComponentType<Record<string, unknown>>;
+  };
+
+  /**
+   * The mode is persisted to scene data, and for a while nothing read it back:
+   * the cache was write-only, so reopening showed a layered group as
+   * `ensemble`. The pad still drove each track through its own lens (that comes
+   * from the members' own meta), but the dropdown lied and Generate would write
+   * six competing parts instead of one.
+   */
+  it('restores the mode and role from scene data', () => {
+    primeGroupConfigs({
+      'group:g1:timbreGroupConfig': { mode: 'layered', role: 'lead' },
+    });
+    const { createTimbreGraphAdapter } = require('../src/timbre-graph-adapter');
+    const adapter = createTimbreGraphAdapter({} as never);
+    const spec = adapter.groupExtensions![0];
+    const el = spec.renderGroup!(
+      { groupId: 'g1', members: [] } as never,
+      { services: { activeSceneId: 's1' }, collapsed: false,
+        handlers: {}, deleteGroup: async () => {},
+        renderDefaultTrackRow: () => null } as never,
+    ) as { props: Record<string, unknown> };
+    expect(el.props.mode).toBe('layered');
+    expect(el.props.layerRole).toBe('lead');
+  });
+
+  it('leaves an untouched group as an ensemble', () => {
+    primeGroupConfigs({});
+    const { createTimbreGraphAdapter } = require('../src/timbre-graph-adapter');
+    const adapter = createTimbreGraphAdapter({} as never);
+    const el = adapter.groupExtensions![0].renderGroup!(
+      { groupId: 'never-configured', members: [] } as never,
+      { services: { activeSceneId: 's1' }, collapsed: false,
+        handlers: {}, deleteGroup: async () => {},
+        renderDefaultTrackRow: () => null } as never,
+    ) as { props: Record<string, unknown> };
+    expect(el.props.mode).toBe('ensemble');
+  });
+
+  it('ignores foreign and malformed scene-data keys', () => {
+    expect(() => primeGroupConfigs({
+      'track:db-1:timbreGroup': { groupId: 'g', memberIndex: 0, role: 'kick' },
+      'group:g2:timbreGroupConfig': null,
+      'group:g3:timbreGroupConfig': { mode: 'nonsense', role: 'zither' },
+    })).not.toThrow();
+    const { createTimbreGraphAdapter } = require('../src/timbre-graph-adapter');
+    const adapter = createTimbreGraphAdapter({} as never);
+    const el = adapter.groupExtensions![0].renderGroup!(
+      { groupId: 'g3', members: [] } as never,
+      { services: { activeSceneId: 's1' }, collapsed: false,
+        handlers: {}, deleteGroup: async () => {},
+        renderDefaultTrackRow: () => null } as never,
+    ) as { props: Record<string, unknown> };
+    // garbage narrows to the safe default, it does not propagate
+    expect(el.props.mode).toBe('ensemble');
+    expect(el.props.layerRole).toBe('bass');
+  });
+});

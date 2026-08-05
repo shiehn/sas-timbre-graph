@@ -31,7 +31,10 @@ import {
   parseTrackGroups,
   useGeneratorPanelCore,
 } from '@signalsandsorcery/plugin-sdk';
-import { createTimbreGraphAdapter } from './src/timbre-graph-adapter';
+import {
+  createTimbreGraphAdapter,
+  primeGroupConfigs,
+} from './src/timbre-graph-adapter';
 import {
   APP_ROLE_TOKENS,
   TIMBRE_ROLES,
@@ -705,6 +708,8 @@ export function TimbreGraphPanel(props: PluginUIProps) {
       }
       try {
         const sceneData = await props.host.getAllSceneData(sceneId);
+        // restore each group's ensemble/layered mode before anything reads it
+        primeGroupConfigs(sceneData as Record<string, unknown>);
         const groups = parseTrackGroups<TimbreGroupMeta>(sceneData, timbreGroupSpec);
         const lensByDbId = new Map<string, number>();
         for (const g of groups) {
