@@ -30,24 +30,40 @@ tglab train       # forward/delta proxy -> ONNX bundle
 tglab bench       # render throughput
 ```
 
-## Reshipping the graph the plugin bundles
+## Reshipping the tour the plugin bundles
 
-`../assets/morph-softer.json` is the artifact the panel replays; it is produced
-by two steps, both of which need Surge XT installed:
+`../assets/tour.json` is the artifact the panel replays: per role, ~20 screened
+Surge patches whose parameter values become the stops on the dial. One command
+builds it (Surge XT must be installed):
 
 ```bash
-.venv/bin/python pick_anchors.py    # choose one anchor per role, by MEASURED morphability
-.venv/bin/python rebuild_graph.py   # probe those anchors, narrow to audible params, solve
-cp workspace/morph-softer.json ../assets/morph-softer.json
+.venv/bin/tglab tour --anchors 20      # ~25-35 min for all six roles
 ```
 
-Anchor choice is the dominant factor in whether the dial is audible at all — a
-patch with no reachable timbre range cannot be morphed however the panel scales
-the gesture (see `docs/TRAINING.md` § C14). `pick_anchors.py` therefore ranks
-candidates by how many parameters measurably change the render and rejects
-patches whose own renders wander (`MAX_SIGMA`). Screening is the slow half and
-writes `workspace/anchor_paths.json` as it goes, so a later failure does not
-cost it twice.
+Read `workspace/reports/tour-report.json` BEFORE shipping — in particular the
+per-role `shortfall` (fewer anchors than asked for) and `sweep.dropped`
+(anchors the composed tour could not reach cleanly). Both are printed as they
+happen; neither is ever silently absorbed. Then:
+
+```bash
+cp workspace/tour.json ../assets/tour.json
+```
+
+What the stages do, and why (full rationale in `src/timbre_graph_lab/tour.py`):
+
+| stage | gate |
+|---|---|
+| screen | loads, passes render QC, own renders steady enough to hear a change through (`MAX_SIGMA`) |
+| lens | the START anchor — role-appropriate category, steadiest renders. Its oscillators and routing colour the whole tour |
+| effect | every candidate re-rendered THROUGH the lens; that is the only sound the dial can make |
+| spread | keep the most perceptually spread survivors (farthest-point sampling) |
+| edges | render the interpolation between neighbours: QC at every point, no wild detour, ends audibly apart |
+| tour | deterministic maximum-travel path through the valid edges, starting at the lens |
+| sweep | the whole tour replayed end to end exactly as the panel plays it; anchors that fail are dropped and the tour re-spliced |
+
+The screening report per role is written incrementally to
+`workspace/reports/anchor-screen-<role>.json`, so a later failure does not cost
+that work twice.
 
 After reshipping, re-run the integration suite below — it is the gate that the
 new artifact is honest.
@@ -56,7 +72,7 @@ new artifact is honest.
 
 ```bash
 .venv/bin/python -m pytest tests/ -q          # pure-python, no Surge needed
-.venv/bin/python -m pytest -m requires_surge tests/test_shipped_graph_integration.py -q
+.venv/bin/python -m pytest -m requires_surge tests/test_shipped_tour_integration.py -q
 ```
 
 The second suite hosts real Surge and asserts, per role, that every parameter

@@ -709,6 +709,80 @@ against a possible `surgepy` spike. Morphability was chosen over category
 fidelity so every role can actually move; closing the load gap is what would
 let a real hi-hat back in.
 
+## C15 — The anchor was never the point: ship a TOUR (2026-08-03)
+
+C14 made the dial audible. Live play still judged it boring, and the complaint
+named the cause exactly: "from 0-100 it sounds like someone is still using the
+same patch the whole time but they maybe turned 1 or 2 parameters."
+
+That is precisely what the artifact contained. Measured on the shipped
+`morph-softer.json`: the kick moved 8 of 34 parameters across the ENTIRE dial,
+the largest by 0.0185 of its range. The morph solved a damped minimum-norm
+least-squares step — by construction *the smallest* parameter change that
+travels along one perceptual axis, chosen so "the patch keeps its identity".
+The objective function was the opposite of what the product wanted.
+
+### C15a — Continuous-only interpolation cannot arrive at another preset
+
+`edges.py` (written after the 2026-08-02 "travel between configurations"
+requirement, never run) proposed the fix: validate morph routes BETWEEN
+same-role anchors and gate on the endpoint landing near B. The first real run
+rejected **11 of 12 bass edges**, median endpoint error 0.94 against a 0.35
+gate.
+
+Direct measurement of why:
+
+| pair | ‖z_B − z_A‖ | achieved travel | endpoint err |
+|---|---|---|---|
+| 0-1 | 1.60 | 7.34 | 5.33 |
+| 0-3 | 4.06 | 2.29 | 0.93 |
+| 3-4 | 4.19 | 2.76 | 0.79 |
+
+The runtime writes only continuous allow-list parameters; oscillator types,
+filter types and FM routing stay at the loaded patch's values. So B's cutoff
+and envelope settings land on A's oscillators and mean something else
+entirely — usually *overshooting* B rather than approaching it.
+
+The conclusion is not that the morph is broken. **Travel per hop is 1.9–11.5
+normalized units** where the whole old dial moved 0.08–0.14. Arriving at B was
+a means the runtime cannot have; travelling somewhere new, cleanly, is the
+product. The gate is now QC + measured travel, not endpoint arrival, and an
+"anchor" is honestly a *new configuration built from a real patch's values*,
+not a reproduction of that patch.
+
+### C15b — Measure through the lens the runtime actually has
+
+Because only anchor 0's preset is ever loaded, every later position is heard
+through ITS structure. Pairwise validation under each edge's own A-anchor
+therefore validated sounds the user never hears, and validity does not compose
+across hops. `tour.py` loads the lens once and renders every candidate, every
+interpolation point and every gate through it, so validation and playback are
+the same signal. The composed tour is then swept end to end as a final gate.
+
+### C15c — The writable parameter set is not fixed
+
+`shared_basis` exists because Surge names oscillator parameters by oscillator
+type. Measured: presets of one role exposed 90, 93 and 97 of the 97-parameter
+allow-list, and **the same preset offered 97 on one load and 87 on the next**,
+depending on load history. A basis taken from any single patch would ship
+parameters the runtime silently drops. The tour ships the intersection over
+that role's screened candidates — every anchor then has a genuinely measured
+value for every parameter it carries — and all writes skip names the live host
+does not expose, matching `setSynthParameters`' lenient relative mode in the
+app.
+
+### What the panel does now
+
+Delete, not adjust: depth control, sensitivity weighting, dial-fraction
+scaling and the ±0.6 per-parameter clamp are all gone. The dial spans 0..1 and
+sends `paramsAt(c) − paramsAt(0)` **raw**, relative to the live sound. Any
+scaling would stop the dial reaching the configurations the artifact promises;
+the values are already in [0,1] and the host clamps to each parameter's range.
+
+Artifact: `tour-graph-v1` (`assets/tour.json`), per-role `param_names`,
+`control_points` (0..1, one per anchor), `anchors[]` and absolute `snapshots`.
+Build with `tglab tour`; see `training/README.md` for the runbook.
+
 ## Licensing note
 
 Corpus manifests retain source + category; 3rd-party patches ship with Surge

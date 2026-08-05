@@ -27,11 +27,27 @@ from timbre_graph_lab.probes import Probe
 
 SILENCE_RMS = 1e-4
 # True hard clipping is a FLAT-TOPPED waveform: many consecutive samples
-# pinned at the same extreme value, with the peak at or below unity.
+# pinned at the same extreme value.
 CLIP_PINNED_RUN = 8
 CLIP_CEILING = 1.0001
 # Absurd level (~+30 dBFS) means self-oscillation or instability, not music.
 RUNAWAY_PEAK = 32.0
+
+# MEASURABILITY and SAFETY are different questions, and conflating them is what
+# hurt someone. `qc_audio` answers the first: is this render a usable
+# measurement? Loud is famously NOT broken there — descriptors run on
+# RMS-normalised audio, and an earlier peak gate threw away 13% of perfectly
+# measurable anchors for being hot (C0b).
+#
+# `qc_loudness` answers the second: is this somewhere a LISTENER should be able
+# to land? An anchor is not a measurement — it is a destination on a dial. Two
+# patches "started screaming" in live play while every gate reported success
+# (2026-08-03), so anchor acceptance now gates on level explicitly.
+SAFE_PEAK = 4.0   # +12 dBFS: still admits genuinely hot presets
+SAFE_RMS = 1.0    # peak alone misses the merely relentless
+# What the BUILD accepts, as a fraction of the above — headroom for the
+# build-vs-playback parameter divergence described in qc_loudness.
+BUILD_MARGIN = 0.6
 
 
 @dataclass
@@ -75,9 +91,36 @@ def qc_audio(audio: np.ndarray) -> RenderQC:
     if peak > RUNAWAY_PEAK:
         return RenderQC(rms, peak, 0, False, "runaway-level")
     pinned = _longest_pinned_run(mag, peak)
-    if peak <= CLIP_CEILING and pinned >= CLIP_PINNED_RUN:
+    # Flat-topping is judged at ANY level. Gating this on `peak <= CLIP_CEILING`
+    # made it unreachable for exactly the loud patches worth catching: a render
+    # peaking at 3.9 with a pinned run of 200 skipped the test entirely.
+    if pinned >= CLIP_PINNED_RUN:
         return RenderQC(rms, peak, pinned, False, "clipping")
     return RenderQC(rms, peak, pinned, True)
+
+
+def qc_loudness(audio: np.ndarray, margin: float = 1.0) -> RenderQC:
+    """Is this a level a listener should be able to reach on a dial?
+
+    Strictly narrower than `qc_audio` and used only for ANCHOR acceptance —
+    screening, edge routes and the composed sweep. See the SAFE_* comment
+    above for why the two gates are separate.
+
+    `margin` < 1 tightens the ceiling, and the BUILD uses it deliberately.
+    Build-time and playback do not always apply an identical parameter set:
+    Surge exposes oscillator parameters by oscillator type and the exposed set
+    varies with load history, so a write skipped in one context lands in the
+    other. Measured 2026-08-03, a kick anchor the build accepted rendered a
+    dead-consistent 5.07 peak afterwards, over a 4.0 ceiling. Accepting only
+    what sits well under the limit leaves room for that divergence instead of
+    discovering it in someone's ears.
+    """
+    qc = qc_audio(audio)
+    if not qc.ok:
+        return qc
+    if qc.peak > SAFE_PEAK * margin or qc.rms > SAFE_RMS * margin:
+        return RenderQC(qc.rms, qc.peak, qc.pinned_run, False, "too-loud")
+    return qc
 
 
 class RenderWorker:

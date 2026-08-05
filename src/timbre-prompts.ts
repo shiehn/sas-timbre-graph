@@ -40,8 +40,30 @@ export const ROLE_REQUEST: Record<TimbreRole, string> = {
   hat: 'hi-hat — the subdivision that carries the momentum',
   bass: 'bass line — locked to the kick, following the chord roots',
   pad: 'sustained chord pad voicing the progression',
-  lead: 'lead melody over the progression',
+  lead: 'arpeggio over the progression',
 };
+
+/**
+ * The lead plays ARPEGGIOS, and the subdivision is rolled per generation.
+ *
+ * A held melody tells you almost nothing about a patch — an arpeggio at a
+ * steady subdivision is a far better probe of a sound you are hunting for,
+ * because every note retriggers the envelope and the filter. Varying the rate
+ * between generations keeps repeated Generate presses from returning the same
+ * feel (the "fixed patterns read as broken" complaint that produced
+ * `variedPattern`).
+ */
+export const LEAD_SUBDIVISIONS = [
+  { label: 'quarter notes', beats: 1 },
+  { label: 'eighth notes', beats: 0.5 },
+  { label: 'sixteenth notes', beats: 0.25 },
+] as const;
+
+/** Seeded so a generation is reproducible; mulberry32-free — one value only. */
+export function leadSubdivision(seed: number): (typeof LEAD_SUBDIVISIONS)[number] {
+  const i = Math.abs(Math.floor(seed)) % LEAD_SUBDIVISIONS.length;
+  return LEAD_SUBDIVISIONS[i];
+}
 
 export function isPitched(role: TimbreRole): boolean {
   return REGISTER[role] !== undefined;
@@ -56,10 +78,15 @@ export function roleUserPrompt(role: TimbreRole): string {
   return ROLE_REQUEST[role];
 }
 
-export function buildTimbreSystemPrompt(role: TimbreRole, meter = '4/4'): string {
+export function buildTimbreSystemPrompt(
+  role: TimbreRole,
+  meter = '4/4',
+  seed = 0,
+): string {
   const pitched = isPitched(role);
   const fixed = FIXED_PITCH[role];
   const register = REGISTER[role];
+  const arp = role === 'lead' ? leadSubdivision(seed) : null;
 
   const pitchRule = pitched
     ? [
@@ -74,10 +101,22 @@ export function buildTimbreSystemPrompt(role: TimbreRole, meter = '4/4'): string
         `Write the RHYTHM and the VELOCITIES; the pitch is fixed.`,
       ].join(' ');
 
+  const shapeRule = arp
+    ? [
+        ``,
+        `SHAPE: write an ARPEGGIO, not a held melody — a steady stream of`,
+        `${arp.label} (${arp.beats} beat each), one note at a time, no chords`,
+        `and no overlaps. Run up and down the notes of the chord under each`,
+        `beat, changing which notes you use as the chords change. Keep it`,
+        `continuous: every ${arp.beats}-beat slot carries a note.`,
+      ].join(' ')
+    : null;
+
   return [
     `You write one ${role} part for an electronic production.`,
     ``,
     pitchRule,
+    ...(shapeRule ? [``, shapeRule] : []),
     ``,
     `TIMING: positions and durations are in quarter-note beats from clip start`,
     `(0 = first beat). The scene is in ${meter}. Never write past the clip end`,

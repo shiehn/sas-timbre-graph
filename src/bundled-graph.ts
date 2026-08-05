@@ -1,8 +1,8 @@
 /**
- * The morph graph that SHIPS with the plugin.
+ * The patch map that SHIPS with the plugin.
  *
- * Requiring an end user to run a Python training CLI before the dial works is
- * not a product; the lab is for RE-training, and its output is shipped as an
+ * Requiring an end user to run a Python training CLI before the pad works is
+ * not a product; the lab is for RE-building, and its output is shipped as an
  * asset. Imported statically so it is bundled into dist by tsup (no runtime
  * file IO, no packaging path to get wrong).
  *
@@ -12,22 +12,7 @@
  * would not exist anywhere else.
  */
 
-import graph from '../assets/morph-softer.json';
+import graph from '../assets/patchmap.json';
+import type { MapGraph } from './patchmap';
 
-export const BUNDLED_GRAPH = graph as unknown as {
-  version: string;
-  axis: { name: string; vector: number[] };
-  control_points: number[];
-  roles: Record<string, {
-    role: string;
-    preset_id: string;
-    fxp_path?: string;
-    name: string;
-    param_names: string[];
-    baseline: number[];
-    snapshots: number[][];
-    cosine: number[];
-    declined: boolean;
-  }>;
-  quality?: Record<string, unknown>;
-};
+export const BUNDLED_GRAPH = graph as unknown as MapGraph;

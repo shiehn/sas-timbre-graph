@@ -16,7 +16,9 @@ PROBE_VERSION = "probes-v1"
 # real, 0 switches) and every anchor perturbs a shared core set. The parameter
 # VECTOR changed, so v1 shards are dimensionally incompatible — never mix.
 POLICY_VERSION = "policy-v2"
-CORPUS_VERSION = "corpus-v1"
+# v2: entries carry `subcategory` (what the patch IS) alongside `category`
+# (who made it, for third-party). v1 manifests have no subcategory field.
+CORPUS_VERSION = "corpus-v2"
 
 ROLES = ["kick", "snare", "hat", "bass", "pad", "lead"]
 

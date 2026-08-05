@@ -10,28 +10,56 @@
  * family derives generation entirely from each track's role.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   GeneratorTrackState,
   GroupRenderContext,
   ResolvedTrackGroup,
 } from '@signalsandsorcery/plugin-sdk';
 import { GroupCollapseChevron } from '@signalsandsorcery/plugin-sdk';
-import type { TimbreGroupMeta } from './timbre-group-meta';
+import type { TimbreGroupMeta, TimbreGroupMode } from './timbre-group-meta';
 import { TIMBRE_GROUP_META_KEY } from './timbre-group-meta';
+import { TIMBRE_ROLES, type TimbreRole } from './role-patterns';
 
 const ACCENT = '#2DD4BF';
+
+const ROLE_LABELS: Record<TimbreRole, string> = {
+  kick: 'Kick', snare: 'Snare', hat: 'Hat',
+  bass: 'Bass', pad: 'Chord Pad', lead: 'Lead',
+};
 
 export function TimbreGroupRow({
   group,
   ctx,
+  mode = 'ensemble',
+  layerRole = 'bass',
+  onModeChange,
 }: {
   group: ResolvedTrackGroup<TimbreGroupMeta, GeneratorTrackState>;
   ctx: GroupRenderContext;
+  /**
+   * `ensemble` — six roles, six parts, a band.
+   * `layered`  — six copies of ONE role playing ONE part, each heard through a
+   *   different structure. A sound-design instrument rather than an arrangement.
+   */
+  mode?: TimbreGroupMode;
+  layerRole?: TimbreRole;
+  onModeChange?: (mode: TimbreGroupMode, role: TimbreRole) => void;
 }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const generateAll = () => {
+    if (mode === 'layered') {
+      /*
+       * One call, not six. Every layer plays the SAME part — the adapter
+       * copies it across after writing — so generating per member would spend
+       * six LLM calls producing six competing lines and then throw five away.
+       */
+      const anchor = group.members.find((m) => m.meta.memberIndex === 0)
+        ?? group.members[0];
+      if (anchor) ctx.handlers.generate(anchor.track.handle.id);
+      return;
+    }
     for (const m of group.members) {
       ctx.handlers.generate(m.track.handle.id);
     }
@@ -50,15 +78,51 @@ export function TimbreGroupRow({
   const anyGenerating = group.members.some((m) => m.track.isGenerating);
 
   /**
+   * Does any member ACTUALLY have MIDI on disk?
+   *
+   * Deliberately not `m.track.hasMidi`. panel-core derives that field with a
+   * role-presence fallback ("if (!hasMidi && handle.role) hasMidi = true"),
+   * and every track in this family is created with a role — so all six report
+   * hasMidi the instant Add Graph makes them, and the gate below opened on
+   * six empty rows. `host.getTrackInfo` is the truthful reading: it comes
+   * straight from the tracks table's has_midi column.
+   *
+   * Re-queried whenever generation finishes (anyGenerating falling to false)
+   * or the membership changes — the only two moments the answer can move.
+   */
+  const memberIds = group.members.map((m) => m.track.handle.id).join(',');
+  const [membersHaveMidi, setMembersHaveMidi] = useState(false);
+  const host = ctx.services.host;
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      for (const id of memberIds ? memberIds.split(',') : []) {
+        try {
+          const info = await host.getTrackInfo(id);
+          if (cancelled) return;
+          if (info?.hasMidi) {
+            setMembersHaveMidi(true);
+            return;
+          }
+        } catch {
+          /* unreadable track can't prove MIDI — keep checking the rest */
+        }
+      }
+      if (!cancelled) setMembersHaveMidi(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [memberIds, anyGenerating, host]);
+
+  /**
    * Member rows stay hidden until generation has begun. Six visible empty
    * tracks read as "press play" — and play nothing. Until there is MIDI, the
    * group is a single header with one obvious next step. `isGenerating` is
    * still part of the gate so the rows are present for the whole operation,
    * however brief it is.
    */
-  const materialized = group.members.some(
-    (m) => m.track.hasMidi || m.track.isGenerating,
-  );
+  const materialized = membersHaveMidi || anyGenerating;
 
   return (
     <div data-testid="timbre-group-row">
@@ -79,6 +143,33 @@ export function TimbreGroupRow({
         <span style={{ opacity: 0.6 }}>
           {group.members.length} track{group.members.length === 1 ? '' : 's'}
         </span>
+        {onModeChange && (
+          <>
+            <select
+              aria-label="group mode"
+              data-testid="timbre-group-mode"
+              value={mode}
+              onChange={(e) => onModeChange(e.target.value as TimbreGroupMode, layerRole)}
+              style={{ font: 'inherit', fontSize: 11 }}
+            >
+              <option value="ensemble">ensemble</option>
+              <option value="layered">layered</option>
+            </select>
+            {mode === 'layered' && (
+              <select
+                aria-label="layered role"
+                data-testid="timbre-group-role"
+                value={layerRole}
+                onChange={(e) => onModeChange(mode, e.target.value as TimbreRole)}
+                style={{ font: 'inherit', fontSize: 11 }}
+              >
+                {TIMBRE_ROLES.map((r) => (
+                  <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                ))}
+              </select>
+            )}
+          </>
+        )}
         <span style={{ flex: 1 }} />
         <button
           type="button"
@@ -92,7 +183,9 @@ export function TimbreGroupRow({
             opacity: anyGenerating ? 0.5 : 1,
           }}
         >
-          {anyGenerating ? 'Generating…' : 'Generate All'}
+          {anyGenerating
+            ? 'Generating…'
+            : mode === 'layered' ? 'Generate Part' : 'Generate All'}
         </button>
         {confirmingDelete ? (
           <button

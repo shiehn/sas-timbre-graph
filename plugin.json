@@ -11,7 +11,7 @@
   "minHostVersion": "2.0.0",
   "builtIn": true,
   "capabilities": {
-    "requiresLLM": false,
+    "requiresLLM": true,
     "requiresSurgeXT": true
   }
 }

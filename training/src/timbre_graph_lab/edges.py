@@ -72,6 +72,58 @@ def edge_metrics(
     return endpoint_err, detour
 
 
+def walk_edge(
+    worker: RenderWorker,
+    param_names: list[str],
+    x_a: np.ndarray,
+    x_b: np.ndarray,
+    z_a: np.ndarray,
+    z_b: np.ndarray,
+    probe,
+    n_points: int = N_POINTS,
+    render_avg: int = EDGE_RENDER_AVG,
+) -> dict:
+    """Render-validate the allow-list interpolation from the LOADED preset A
+    toward B. The caller must have loaded A's preset; deltas are taken against
+    the worker's live baseline so discrete/structural params stay at A's
+    values by construction. Returns the edge verdict without endpoint ids —
+    the caller owns naming.
+    """
+    base = worker.baseline_raw
+    # deltas toward B in the shared allow-list frame, applied on A's load
+    dx_total = {
+        n: float(x_b[i] - base.get(n, x_a[i]))
+        for i, n in enumerate(param_names)
+        if abs(x_b[i] - x_a[i]) > 1e-6
+    }
+    z_rows, ok = [], True
+    for t in np.linspace(0.0, 1.0, n_points + 2)[1:]:
+        worker.apply_delta({n: t * d for n, d in dx_total.items()})
+        audio = worker.render(probe)
+        if not qc_audio(audio).ok:
+            ok = False
+            break
+        z_rows.append(worker.render_descriptors(probe, k=render_avg))
+    worker.restore_baseline()
+    if not ok:
+        return {"valid": False, "reason": "qc-fail-on-path"}
+
+    z_path = np.stack(z_rows)
+    endpoint_err, detour = edge_metrics(z_path, z_a, z_b)
+    valid = endpoint_err <= MAX_ENDPOINT_ERR and detour <= MAX_DETOUR
+    return {
+        "valid": valid,
+        "endpoint_err": round(endpoint_err, 4),
+        "detour": round(detour, 4),
+        # the rendered route itself — kept for diagnostics and for
+        # detecting non-monotonic morphs later. The param trajectory
+        # needs no storage: it is the linear interpolation A->B over
+        # the shared allow-list.
+        "z_path": np.round(z_path, 4).tolist(),
+        **({} if valid else {"reason": "endpoint-or-detour"}),
+    }
+
+
 def _anchor_table(cfg: LabConfig, role: str) -> list[dict]:
     """QC-passing anchors of a role with their baseline x and z, from shards."""
     out = []
@@ -113,46 +165,11 @@ def build_role_graph(
         fxp = path_by_id.get(a["preset_id"])
         if fxp is None or not worker.load_preset(fxp):
             continue
-        names = a["param_names"]
-        base = worker.baseline_raw
-        # deltas toward B in the shared allow-list frame, applied on A's load
-        dx_total = {
-            n: float(b["x"][i] - base.get(n, a["x"][i]))
-            for i, n in enumerate(names)
-            if abs(b["x"][i] - a["x"][i]) > 1e-6
-        }
-        z_rows, ok = [], True
-        for t in np.linspace(0.0, 1.0, n_points + 2)[1:]:
-            worker.apply_delta({n: t * d for n, d in dx_total.items()})
-            audio = worker.render(probe)
-            if not qc_audio(audio).ok:
-                ok = False
-                break
-            z_rows.append(worker.render_descriptors(probe, k=EDGE_RENDER_AVG))
-        worker.restore_baseline()
-        if not ok:
-            edges.append(
-                {"a": a["preset_id"], "b": b["preset_id"], "valid": False,
-                 "reason": "qc-fail-on-path"}
-            )
-            continue
-
-        z_path = np.stack(z_rows)
-        endpoint_err, detour = edge_metrics(z_path, a["z"], b["z"])
-        valid = endpoint_err <= MAX_ENDPOINT_ERR and detour <= MAX_DETOUR
-        edges.append(
-            {
-                "a": a["preset_id"], "b": b["preset_id"], "valid": valid,
-                "endpoint_err": round(endpoint_err, 4),
-                "detour": round(detour, 4),
-                # the rendered route itself — kept for diagnostics and for
-                # detecting non-monotonic morphs later. The param trajectory
-                # needs no storage: it is the linear interpolation A->B over
-                # the shared allow-list.
-                "z_path": np.round(z_path, 4).tolist(),
-                **({} if valid else {"reason": "endpoint-or-detour"}),
-            }
+        verdict = walk_edge(
+            worker, a["param_names"], a["x"], b["x"], a["z"], b["z"], probe,
+            n_points=n_points,
         )
+        edges.append({"a": a["preset_id"], "b": b["preset_id"], **verdict})
 
     return {
         "role": role,

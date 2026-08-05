@@ -1,20 +1,23 @@
 /**
- * Timbre Graph panel — six coupled Surge XT tracks and one morph dial.
+ * Timbre Graph panel — six coupled Surge XT tracks and one tour dial.
  *
  * Built on the SDK's panel-core: `useGeneratorPanelCore` + `GeneratorPanelShell`
  * own the track rows, mixer strip, sound drawer/history, shuffle, add-track
  * button and render phases — all shared with the other generator families.
- * This file contributes only what is unique here: the MORPH SECTION rendered
+ * This file contributes only what is unique here: the TOUR SECTION rendered
  * in the shell's `beforeRows` slot.
  *
- * The dial replays a precomputed morph graph (built by the training lab): a
- * render-verified parameter snapshot per synth per control position. Runtime
- * is linear interpolation between two snapshots — no model, no solver, no
+ * The dial replays a precomputed tour (built by the training lab): a sequence
+ * of ~20 screened, render-validated parameter configurations per synth, each
+ * taken from a real factory patch. Runtime is linear interpolation between
+ * the two snapshots either side of the dial — no model, no solver, no
  * latency. Per-track link toggles freeze a synth without touching the rest.
  *
- * Findings that shaped this UI (docs/TRAINING.md C13): expressiveness is
- * asymmetric and role-specific, so a track that cannot follow the current
- * direction shows "holding" instead of faking motion.
+ * Why a tour rather than an axis (docs/TRAINING.md C15): the previous dial
+ * solved for the SMALLEST parameter change that moved one perceptual axis,
+ * so from 0 to 100 the patch never stopped being itself. Anchors travel
+ * between configurations instead, and the artifact carries their absolute
+ * values — the panel's only job is to interpolate and send the difference.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,6 +44,17 @@ import {
   type TimbreGroupMeta,
 } from './src/timbre-group-meta';
 import { BUNDLED_GRAPH } from './src/bundled-graph';
+import {
+  confidenceAt,
+  lensAt,
+  movedParamIndices,
+  nearestPoint,
+  paramsAtXY,
+  type MapGraph,
+} from './src/patchmap';
+import { XYPad } from './src/XYPad';
+
+const ACCENT = '#2DD4BF'; // teal, matching the panel accent
 
 const ROLE_LABELS: Record<TimbreRole, string> = {
   kick: 'Kick',
@@ -51,77 +65,47 @@ const ROLE_LABELS: Record<TimbreRole, string> = {
   lead: 'Lead',
 };
 
-/** Shape of the artifact written by `tglab morph`. */
-export interface MorphGraph {
-  version: string;
-  axis: { name: string; vector: number[] };
-  control_points: number[];
-  roles: Record<
-    string,
-    {
-      role: string;
-      preset_id: string;
-      /** Engine track id, stamped at import. Identity is never a name. */
-      track_id?: string;
-      /** Path to the anchor's .fxp, restored at import. */
-      fxp_path?: string;
-      name: string;
-      param_names: string[];
-      /** Measured per-parameter audibility (Jacobian row norm); 0 = inert. */
-      sensitivity?: number[];
-      baseline: number[];
-      snapshots: number[][];
-      cosine: number[];
-      declined: boolean;
-    }
-  >;
-  quality?: Record<string, unknown>;
-}
-
-const GRAPH_KEY = 'timbre-graph.morph';
-const LINKS_KEY = 'timbre-graph.links';
-
 /**
- * Linear interpolation between the two verified snapshots either side of
- * `control`. This is the entire runtime of the instrument.
+ * Project-data key. Deliberately NOT the old 'timbre-graph.morph': a stored
+ * single-anchor graph has no meaning here, and a fresh key makes every
+ * existing project fall back to the shipped tour with no migration code.
  */
-export function paramsAt(
-  controlPoints: readonly number[],
-  snapshots: readonly number[][],
-  control: number,
-): number[] {
-  if (controlPoints.length === 0) return [];
-  const lo = controlPoints[0];
-  const hi = controlPoints[controlPoints.length - 1];
-  const c = Math.min(Math.max(control, lo), hi);
-  let j = 1;
-  while (j < controlPoints.length - 1 && controlPoints[j] < c) j += 1;
-  const x0 = controlPoints[j - 1];
-  const x1 = controlPoints[j];
-  const w = x1 === x0 ? 0 : (c - x0) / (x1 - x0);
-  const a = snapshots[j - 1] ?? [];
-  const b = snapshots[j] ?? a;
-  return a.map((v, i) => v * (1 - w) + (b[i] ?? v) * w);
+const GRAPH_KEY = 'timbre-graph.map';
+const LINKS_KEY = 'timbre-graph.links';
+const MAP_VERSION = 'map-graph-v2';
+/** Where the pad starts, and what "home" means: point 0, the lens. */
+const ORIGIN: [number, number] = [0, 0];
+/**
+ * Quietest a position plays when it is deep in hybrid territory, as a fraction
+ * of full (0.15 ≈ -16 dB).
+ *
+ * This is the RUNTIME half of ear safety, and it is the half that actually
+ * generalises. The build can only ever sample a continuous surface: pruning a
+ * 9x9 grid still left a handful of random positions out of 640 measuring 4-11 dB
+ * hot, because a blend of two individually-safe filter settings can resonate
+ * where neither does. Sampling harder is a losing game.
+ *
+ * But those positions are precisely the LOW-CONFIDENCE ones — the hybrids. So
+ * the rule "the less sure we are of a sound, the quieter we play it" converts
+ * the residual risk from a scream into a quiet hybrid, without any sampling
+ * claim at all. At sharpness 20 roughly three quarters of the surface has
+ * confidence 1.0 and is therefore untouched by this.
+ *
+ * Was 0.75 (-2.5 dB), too shallow to cancel an 11 dB lurch; then 0.25.
+ */
+const CONFIDENCE_FLOOR = 0.15;
+
+/** The tour section rendered above the standard track rows. Exported for tests. */
+/**
+ * How loud a position plays, given how certain it is. Exported so the lab's
+ * safety gate can measure what the LISTENER hears rather than what the synth
+ * emits — the two differ by exactly this factor.
+ */
+export function levelForConfidence(confidence: number): number {
+  const c = Math.min(1, Math.max(0, confidence));
+  return CONFIDENCE_FLOOR + (1 - CONFIDENCE_FLOOR) * c;
 }
 
-/** Which dial directions this track can actually follow. */
-export function reachableDirections(
-  controlPoints: readonly number[],
-  snapshots: readonly number[][],
-  baseline: readonly number[],
-): { negative: boolean; positive: boolean } {
-  const moves = (i: number): boolean =>
-    (snapshots[i] ?? []).some((v, k) => Math.abs(v - (baseline[k] ?? v)) > 1e-6);
-  let negative = false;
-  let positive = false;
-  controlPoints.forEach((c, i) => {
-    if (c < 0 && moves(i)) negative = true;
-    if (c > 0 && moves(i)) positive = true;
-  });
-  return { negative, positive };
-}
-
-/** The morph section rendered above the standard track rows. Exported for tests. */
 export function MorphSection({
   host,
   activeSceneId,
@@ -136,40 +120,67 @@ export function MorphSection({
    * re-added, and a dial faithfully writing to deleted tracks is silent
    * (observed live — stamped 1235-1255 vs live 1464-1484).
    */
-  resolveTrackIds: (role: string) => string[];
+  resolveTrackIds: (role: string) => Array<{ id: string; lensIndex: number }>;
   onTracksChanged: () => void;
 }) {
-  // The plugin SHIPS with a measured graph; a project-stored one (from an
+  // The plugin SHIPS with a measured tour; a project-stored one (from an
   // import) overrides it. The dial is therefore live on first open — the
   // training lab is for re-training, not a user prerequisite.
-  const [graph, setGraph] = useState<MorphGraph | null>(
-    BUNDLED_GRAPH as unknown as MorphGraph,
-  );
+  const [graph, setGraph] = useState<MapGraph | null>(BUNDLED_GRAPH);
   const [imported, setImported] = useState(false);
-  const [control, setControl] = useState(0);
+  const [pos, setPos] = useState<[number, number]>(ORIGIN);
+  const [hovered, setHovered] = useState<number | null>(null);
   /**
-   * Gesture strength as a target PERCEPTUAL effect, in standardized
-   * descriptor units (1.0 ~ one corpus standard deviation of timbre change).
+   * Which WORLD every layer is exploring.
    *
-   * Scaling by parameter movement was measurably backwards. Damped
-   * least-squares prefers small moves, so a sensitive control needs only a
-   * tiny delta while an inert one needs a large one — meaning the LARGEST
-   * deltas land on the LEAST audible parameters. Normalising to peak delta
-   * therefore scaled each gesture to its most inaudible component: the lead's
-   * budget went to `a_width` (measured audibility 0.46) while
-   * `a_filter_1_cutoff` (10.95, i.e. 24x more audible) barely moved, and the
-   * lead never audibly changed.
-   *
-   * Using the shipped per-parameter sensitivity, the gesture is scaled by its
-   * predicted audible effect instead, so every role moves by a comparable
-   * amount of PERCEIVED change.
+   * A lens is a structure the runtime cannot write — oscillator and filter
+   * types, routing — so its map is a hard ceiling on what dragging can reach.
+   * Changing it is the difference between hunting inside one sound and
+   * starting somewhere else entirely. Shared across the six roles so the
+   * ensemble moves together; clamped per role, since roles yield different
+   * numbers of viable lenses.
    */
-  const [strength, setStrength] = useState(4);
+  const [world, setWorld] = useState(0);
   const [linked, setLinked] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState('');
   const [importProgress, setImportProgress] = useState<number | null>(null);
   const applying = useRef(false);
-  const pending = useRef<number | null>(null);
+  const pending = useRef<[number, number] | null>(null);
+
+  /**
+   * The dots drawn on the pad.
+   *
+   * Taken from the role with the richest map: every role shares the same unit
+   * square, so one set of coordinates addresses all six at once, and the
+   * densest one gives the truest picture of where things are. The puck's
+   * position means the same thing to every layer.
+   */
+  const padPoints = useMemo(() => {
+    const lenses = Object.values(graph?.roles ?? {})
+      .map((r) => lensAt(r, world))
+      .filter((l): l is NonNullable<typeof l> => l !== null);
+    const best = lenses.reduce(
+      (a, b) => (b.points.length > (a?.points.length ?? 0) ? b : a),
+      lenses[0],
+    );
+    return (best?.points ?? []).map((p) => ({ xy: p.xy, name: p.name }));
+  }, [graph, world]);
+
+  /** How many worlds are on offer — the most any role has. */
+  const worldCount = useMemo(
+    () => Math.max(1, ...Object.values(graph?.roles ?? {}).map((r) => r.lenses?.length ?? 0)),
+    [graph],
+  );
+
+  /** Per role, the parameters the map touches anywhere. Computed once. */
+  const movedByRole = useMemo(() => {
+    const out: Record<string, number[]> = {};
+    for (const [role, t] of Object.entries(graph?.roles ?? {})) {
+      const l = lensAt(t, world);
+      if (l) out[role] = movedParamIndices(l.snapshots);
+    }
+    return out;
+  }, [graph, world]);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,8 +189,9 @@ export function MorphSection({
         const raw = await host.getProjectData?.<unknown>(GRAPH_KEY);
         if (!cancelled && raw) {
           const stored = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (stored && (stored as MorphGraph).roles) {
-            setGraph(stored as MorphGraph);
+          if (stored && (stored as MapGraph).version === MAP_VERSION
+            && (stored as MapGraph).roles) {
+            setGraph(stored as MapGraph);
             setImported(true);
           }
         }
@@ -217,9 +229,9 @@ export function MorphSection({
           r.onerror = () => reject(r.error ?? new Error('could not read file'));
           r.readAsText(file);
         });
-        const parsed = JSON.parse(text) as MorphGraph;
-        if (!parsed?.roles || !parsed?.control_points?.length) {
-          setStatus('Not a morph graph: missing roles/control_points.');
+        const parsed = JSON.parse(text) as MapGraph;
+        if (parsed?.version !== MAP_VERSION || !parsed?.roles) {
+          setStatus(`Not a patch map (need version ${MAP_VERSION}).`);
           return;
         }
         const roleList = Object.keys(parsed.roles);
@@ -245,9 +257,12 @@ export function MorphSection({
               { groupId, memberIndex: i, role: timbre ?? 'lead' },
             );
           }
-          if (t.fxp_path && typeof host.applySurgeFxpPreset === 'function') {
+          // anchor 0 is the tour's structural lens: every later position is
+          // heard through this preset's oscillators and routing
+          const startFxp = t.lenses?.[0]?.points?.[0]?.fxp_path;
+          if (startFxp && typeof host.applySurgeFxpPreset === 'function') {
             try {
-              await host.applySurgeFxpPreset(handle.id, t.fxp_path);
+              await host.applySurgeFxpPreset(handle.id, startFxp);
             } catch (err) {
               // Missing on this machine: track keeps a default patch;
               // snapshots remain meaningful relative moves.
@@ -259,7 +274,7 @@ export function MorphSection({
         }
         await host.setProjectData?.(GRAPH_KEY, JSON.stringify(parsed));
         setGraph(parsed);
-        setControl(0);
+        setPos(ORIGIN);
         setStatus('');
         setImportProgress(null);
         onTracksChanged();
@@ -274,14 +289,14 @@ export function MorphSection({
   /** Drop an imported graph and fall back to the shipped one. */
   const revertToBundled = useCallback(async () => {
     await host.setProjectData?.(GRAPH_KEY, '');
-    setGraph(BUNDLED_GRAPH as unknown as MorphGraph);
+    setGraph(BUNDLED_GRAPH);
     setImported(false);
-    setControl(0);
+    setPos(ORIGIN);
   }, [host]);
 
   /** Coalesced apply: while a write is in flight the newest position wins. */
   const apply = useCallback(
-    async (value: number) => {
+    async (value: [number, number]) => {
       if (!graph) return;
       if (applying.current) {
         pending.current = value;
@@ -293,77 +308,102 @@ export function MorphSection({
       // role order, so ANY earlier error made it look permanently dead.
       const failures: string[] = [];
       try {
-        let wrote = 0;
+        // At the start of the tour every delta is zero, so nothing is SENT
+        // even though the tracks are right there. Reporting that as "no
+        // tracks" would be a lie the user hits every time they press reset,
+        // so the status keys off whether targets EXIST, not whether the dial
+        // had anything to say.
+        let hadTargets = false;
         for (const role of Object.keys(graph.roles)) {
           if (linked[role] === false) continue;
-          const t = graph.roles[role];
-          if (!t || t.declined) continue;
+          const entry = graph.roles[role];
+          if (!entry || entry.declined) continue;
+
           const live = resolveTrackIds(role);
-          const targets = live.length > 0 ? live : t.track_id ? [t.track_id] : [];
+          const targets = live.length > 0
+            ? live
+            : entry.track_id
+              ? [{ id: entry.track_id, lensIndex: 0 }]
+              : [];
           if (targets.length === 0) continue;
-          // DELTAS from the dial centre, scaled by depth, applied RELATIVE to
-          // each track's live parameters — the morph rides on whatever sound
-          // the track currently has instead of snapping it to the artifact's
-          // absolute operating point. Only params the graph actually moves
-          // are sent, so untouched controls stay untouched.
-          const values = paramsAt(graph.control_points, t.snapshots, value);
-          const centre = paramsAt(graph.control_points, t.snapshots, 0);
-          const raw = values.map((v, i) => v - centre[i]);
-          const span = Math.max(
-            Math.abs(graph.control_points[graph.control_points.length - 1]),
-            1e-9,
-          );
-          const dialFrac = Math.min(1, Math.abs(value) / span);
+          hadTargets = true;
 
-          // Predicted audible effect of the gesture: |delta ⊙ sensitivity|.
-          // Scaling by this (rather than by delta size) puts the budget where
-          // the sound actually lives. Falls back to delta magnitude for a
-          // legacy artifact that carries no sensitivity.
-          const sens = t.sensitivity;
-          const effect = Math.sqrt(
-            raw.reduce((acc, d, i) => {
-              const w = sens ? (sens[i] ?? 0) : 1;
-              return acc + (d * w) ** 2;
-            }, 0),
-          );
-          const fallbackPeak = Math.max(...raw.map(Math.abs));
-          const gain = sens && effect > 1e-9
-            ? (strength * dialFrac) / effect
-            : fallbackPeak > 1e-9
-              ? (0.5 * dialFrac) / fallbackPeak
-              : 0;
-
-          const params: Record<string, number> = {};
-          t.param_names.forEach((name, i) => {
-            // Per-parameter ceiling: a gain sized for perceptual effect can
-            // ask an inert control for an absurd move, which just rails it.
-            const delta = Math.max(-0.6, Math.min(0.6, raw[i] * gain));
-            if (Math.abs(delta) > 1e-5) params[name] = delta;
-          });
-          if (Object.keys(params).length === 0) continue;
-          if (typeof host.setSynthParameters !== 'function') {
-            setStatus('This host predates SDK 2.57.0 — parameter writes unavailable.');
-            return;
+          /*
+           * Grouped BY WORLD, not by role.
+           *
+           * A layered group is six tracks of one role that differ only in the
+           * lens they are heard through, so one set of parameters per role
+           * would make them six identical voices — the exact opposite of the
+           * mode. Grouping keeps the arithmetic once per distinct world while
+           * letting each member land somewhere structurally different.
+           */
+          const byWorld = new Map<number, string[]>();
+          for (const tgt of targets) {
+            const w = tgt.lensIndex + world;
+            byWorld.set(w, [...(byWorld.get(w) ?? []), tgt.id]);
           }
-          for (const id of targets) {
-            try {
-              await host.setSynthParameters(id, params, 0, { relative: true });
-              wrote += 1;
-            } catch (err) {
-              // Log per failure so it is diagnosable in renderer-logs, and
-              // keep going: the other five synths must still morph.
-              failures.push(role);
-              console.error(
-                `[TimbreGraph] morph write failed role=${role} track=${id}`,
-                err,
-              );
+
+          for (const [w, ids] of byWorld) {
+            const t = lensAt(entry, w);
+            if (!t) continue;
+            // The move from this world's ORIGIN to the puck, applied RELATIVE
+            // to each track's live parameters — so the map rides on whatever
+            // sound the track currently has instead of snapping to absolutes.
+            //
+            // Deltas go out RAW: both ends are render-validated configurations,
+            // every value is already in [0,1], and the host clamps to each
+            // parameter's declared range, so scaling here could only stop the
+            // puck reaching the patches the map promises.
+            const values = paramsAtXY(t, value);
+            const start = paramsAtXY(t, ORIGIN);
+
+            // EVERY parameter this world moves, at every position — a zero
+            // delta is a real instruction ("return this one to base"), not a
+            // no-op to skip. See movedParamIndices.
+            const params: Record<string, number> = {};
+            for (const i of movedParamIndices(t.snapshots)) {
+              params[t.param_names[i]] = (values[i] ?? 0) - (start[i] ?? 0);
+            }
+            if (Object.keys(params).length === 0) continue;
+            if (typeof host.setSynthParameters !== 'function') {
+              setStatus('This host predates SDK 2.57.0 — parameter writes unavailable.');
+              return;
+            }
+            /*
+             * Sit uncertain layers back in the mix.
+             *
+             * A position where one anchor dominates IS a checked patch; a
+             * hybrid is inside the hull of checked configurations but has not
+             * itself been rendered. Weighting level by that confidence makes
+             * the stack lean on what is known without ever silencing the
+             * exploration — and it is free, because the blend already computes
+             * the number. Deliberately a narrow range: this is a lean, not a
+             * duck, and it must not fight the panel's own mixer.
+             */
+            const level = levelForConfidence(confidenceAt(t, value));
+
+            for (const id of ids) {
+              try {
+                await host.setSynthParameters(id, params, 0, { relative: true });
+                if (typeof host.setTrackVolume === 'function') {
+                  await host.setTrackVolume(id, level);
+                }
+              } catch (err) {
+                // Log per failure so it is diagnosable in renderer-logs, and
+                // keep going: the other layers must still move.
+                failures.push(role);
+                console.error(
+                  `[TimbreGraph] map write failed role=${role} track=${id}`,
+                  err,
+                );
+              }
             }
           }
         }
-        if (wrote === 0) {
+        if (!hadTargets) {
           setStatus('No live tracks to drive — Add Graph first, then move the dial.');
         } else if (failures.length > 0) {
-          setStatus(`morph failed on: ${[...new Set(failures)].join(', ')}`);
+          setStatus(`failed on: ${[...new Set(failures)].join(', ')}`);
         } else {
           setStatus('');
         }
@@ -378,15 +418,40 @@ export function MorphSection({
         }
       }
     },
-    [graph, host, linked, resolveTrackIds, strength],
+    [graph, host, linked, resolveTrackIds, movedByRole, world],
   );
 
-  const onDial = useCallback(
-    (value: number) => {
-      setControl(value);
+  const onMove = useCallback(
+    (value: [number, number]) => {
+      setPos(value);
       void apply(value);
     },
     [apply],
+  );
+
+  /**
+   * Let go and the puck settles onto the nearest checked point.
+   *
+   * Dragging stays continuous and exploratory; the resolve happens at the one
+   * moment the user has stopped and is listening, which is also the moment a
+   * guarantee is worth most. Uses the richest role's map — the same one the
+   * dots are drawn from — so what you see is what you snap to.
+   */
+  const onSettle = useCallback(
+    (value: [number, number]) => {
+      const roles = Object.values(graph?.roles ?? {});
+      const best = roles
+        .map((r) => lensAt(r, world))
+        .filter((l): l is NonNullable<typeof l> => l !== null)
+        .reduce((a, b) => (b.points.length > (a?.points.length ?? 0) ? b : a),
+                null as ReturnType<typeof lensAt>);
+      const snap = best ? nearestPoint(best, value) : null;
+      if (!snap) return;
+      const at: [number, number] = [snap[0], snap[1]];
+      setPos(at);
+      void apply(at);
+    },
+    [graph, world, apply],
   );
 
   const toggleLink = useCallback(
@@ -408,8 +473,8 @@ export function MorphSection({
       >
         <div style={{ opacity: 0.8, marginBottom: 8 }}>
           <b>Add Graph</b> creates the six-track group (kick, snare, hat, bass,
-          pad, lead) on the shipped anchor patches — then <b>Generate All</b>{' '}
-          to hear it, and sweep the dial to morph all six together.
+          pad, lead) on the shipped start patches — then <b>Generate All</b>{' '}
+          to hear it, and sweep the dial to tour all six together.
         </div>
         <label
           style={{
@@ -417,7 +482,7 @@ export function MorphSection({
             background: 'rgba(127,127,127,0.18)', cursor: 'pointer',
           }}
         >
-          Import morph graph…
+          Import tour graph…
           <input
             type="file"
             accept=".json,application/json"
@@ -451,38 +516,41 @@ export function MorphSection({
     );
   }
 
-  const lo = graph.control_points[0];
-  const hi = graph.control_points[graph.control_points.length - 1];
-
   return (
     <div
       data-testid="timbre-graph-morph-section"
       style={{ padding: '10px 12px', fontSize: 12 }}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
-        <span style={{ fontWeight: 600 }}>Morph</span>
-        <span style={{ opacity: 0.6 }}>axis: {graph.axis.name}</span>
-        <span style={{ flex: 1 }} />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: 0.75 }}>
-          depth
-          <select
-            aria-label="morph depth"
-            value={strength}
-            onChange={(e) => setStrength(Number(e.target.value))}
-            style={{ font: 'inherit', fontSize: 11 }}
+        <span style={{ fontWeight: 600 }}>Map</span>
+        {worldCount > 1 && (
+          <button
+            type="button"
+            data-testid="timbre-next-world"
+            onClick={() => {
+              const next = (world + 1) % worldCount;
+              setWorld(next);
+              // land on the new world's origin: the old coordinates mean
+              // nothing here, and its start patch is the honest place to begin
+              setPos(ORIGIN);
+              void apply(ORIGIN);
+            }}
+            title="Different starting patches — a different set of sounds to explore"
+            style={{
+              font: 'inherit', fontSize: 11, padding: '2px 8px', borderRadius: 10,
+              border: `1px solid ${ACCENT}`, background: 'transparent',
+              cursor: 'pointer', opacity: 0.85,
+            }}
           >
-            <option value={1}>verified</option>
-            <option value={2}>subtle</option>
-            <option value={4}>strong</option>
-            <option value={8}>extreme</option>
-            <option value={16}>max</option>
-          </select>
-        </label>
+            world {world + 1}/{worldCount} ↻
+          </button>
+        )}
+        <span style={{ flex: 1 }} />
         {imported && (
           <button
             type="button"
             onClick={() => void revertToBundled()}
-            title="Discard the imported graph and use the one shipped with the plugin"
+            title="Discard the imported map and use the one shipped with the plugin"
             style={{ font: 'inherit', background: 'none', border: 'none',
                      cursor: 'pointer', opacity: 0.55, fontSize: 11 }}
           >
@@ -490,7 +558,7 @@ export function MorphSection({
           </button>
         )}
         <label
-          title="Advanced: load a graph produced by the training lab"
+          title="Advanced: load a map produced by the training lab"
           style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }}
         >
           import…
@@ -506,27 +574,32 @@ export function MorphSection({
         </label>
       </div>
 
-      <input
-        aria-label="morph"
-        type="range"
-        min={lo}
-        max={hi}
-        step={(hi - lo) / 200}
-        value={control}
-        onChange={(e) => onDial(Number(e.target.value))}
-        style={{ width: '100%' }}
-      />
-      <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.55 }}>
-        <span>−</span>
-        <button
-          type="button"
-          onClick={() => onDial(0)}
-          style={{ font: 'inherit', background: 'none', border: 'none',
-                   cursor: 'pointer', opacity: 0.7 }}
-        >
-          reset
-        </button>
-        <span>+</span>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        <XYPad
+          points={padPoints}
+          value={pos}
+          onChange={onMove}
+          onRelease={onSettle}
+          hovered={hovered}
+          onHover={setHovered}
+          accent={ACCENT}
+        />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* The one label on the surface, and only while pointing at it:
+              the map stays a place to explore, not a preset list to read. */}
+          <div style={{ minHeight: 16, opacity: 0.6, fontSize: 11 }}>
+            {hovered !== null ? padPoints[hovered]?.name : ''}
+          </div>
+          <button
+            type="button"
+            onClick={() => onMove(ORIGIN)}
+            style={{ font: 'inherit', fontSize: 11, marginTop: 6, padding: '3px 8px',
+                     borderRadius: 4, border: '1px solid rgba(127,127,127,0.35)',
+                     background: 'transparent', cursor: 'pointer' }}
+          >
+            home
+          </button>
+        </div>
       </div>
 
       {/* link chips: freeze a synth without touching the rest */}
@@ -534,14 +607,10 @@ export function MorphSection({
         {TIMBRE_ROLES.map((role) => {
           const t = graph.roles[role];
           if (!t) return null;
-          const dirs = reachableDirections(
-            graph.control_points, t.snapshots, t.baseline,
-          );
           const isLinked = linked[role] !== false;
-          const holding =
-            t.declined ||
-            (control < 0 && !dirs.negative) ||
-            (control > 0 && !dirs.positive);
+          // "holding": this role has no tour to travel, so it stays put and
+          // says so rather than inventing a change.
+          const holding = t.declined || (lensAt(t, world)?.points.length ?? 0) < 2;
           return (
             <button
               key={role}
@@ -597,15 +666,31 @@ export function TimbreGraphPanel(props: PluginUIProps) {
    * other panels' tracks (observed live on track 1083).
    */
   const groupMemberIdsRef = useRef<Set<string>>(new Set());
-  const resolveTrackIds = useCallback((role: string): string[] => {
-    const want = toTimbreRole(role);
-    const members = groupMemberIdsRef.current;
-    return tracksRef.current
-      .filter((t) => members.has(t.handle.id))
-      .filter((t) => toTimbreRole(t.role) === want
-        || toTimbreRole(t.handle.role) === want)
-      .map((t) => t.handle.id);
-  }, []);
+  /** engine id -> the member's own lens index (layered groups spread these). */
+  const memberLensRef = useRef<Map<string, number>>(new Map());
+  /**
+   * Engine ids to drive for a role, each with the WORLD it explores.
+   *
+   * A layered group puts every member on the same role, so the id alone is not
+   * enough to know what to write — the members differ only by lens. Carrying
+   * that here keeps the apply loop honest for both modes: an ensemble member
+   * simply reports lens 0 and follows the global world offset.
+   */
+  const resolveTrackIds = useCallback(
+    (role: string): Array<{ id: string; lensIndex: number }> => {
+      const want = toTimbreRole(role);
+      const members = groupMemberIdsRef.current;
+      return tracksRef.current
+        .filter((t) => members.has(t.handle.id))
+        .filter((t) => toTimbreRole(t.role) === want
+          || toTimbreRole(t.handle.role) === want)
+        .map((t) => ({
+          id: t.handle.id,
+          lensIndex: memberLensRef.current.get(t.handle.id) ?? 0,
+        }));
+    },
+    [],
+  );
 
   // Group membership comes from the scene-data meta the core has resolved.
   // Kept in a ref so the resolver stays referentially stable.
@@ -615,22 +700,29 @@ export function TimbreGraphPanel(props: PluginUIProps) {
       const sceneId = props.activeSceneId;
       if (!sceneId) {
         groupMemberIdsRef.current = new Set();
+        memberLensRef.current = new Map();
         return;
       }
       try {
         const sceneData = await props.host.getAllSceneData(sceneId);
         const groups = parseTrackGroups<TimbreGroupMeta>(sceneData, timbreGroupSpec);
-        const memberDbIds = new Set(
-          groups.flatMap((g) => g.members.map((m) => m.dbId)),
-        );
+        const lensByDbId = new Map<string, number>();
+        for (const g of groups) {
+          for (const m of g.members) {
+            // fall back to member index: in a layered group that spreads the
+            // members across worlds, which is the whole point of the mode
+            lensByDbId.set(m.dbId, m.meta.lensIndex ?? m.meta.memberIndex);
+          }
+        }
         if (cancelled) return;
-        groupMemberIdsRef.current = new Set(
-          tracksRef.current
-            .filter((t) => memberDbIds.has(t.handle.dbId))
-            .map((t) => t.handle.id),
+        const live = tracksRef.current.filter((t) => lensByDbId.has(t.handle.dbId));
+        groupMemberIdsRef.current = new Set(live.map((t) => t.handle.id));
+        memberLensRef.current = new Map(
+          live.map((t) => [t.handle.id, lensByDbId.get(t.handle.dbId) ?? 0]),
         );
       } catch {
         groupMemberIdsRef.current = new Set();
+        memberLensRef.current = new Map();
       }
     })();
     return () => { cancelled = true; };

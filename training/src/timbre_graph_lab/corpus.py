@@ -9,6 +9,7 @@ bootstrap the corpus; render-time QC is the real gate. Manual overrides
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,6 +26,17 @@ class CorpusEntry:
     name: str
     source: str  # "factory" | "3rdparty"
     category: str  # factory folder / 3rd-party author folder
+    # What the patch IS, as opposed to who made it.
+    #
+    # Third-party is uniformly `author/subcategory/patch.fxp` (2371 files, zero
+    # exceptions), so `category` — which is parts[0] — holds the AUTHOR for
+    # every one of the 1557 third-party entries, and the thing that says
+    # "Drums" or "Basses" was computed for role assignment and then thrown
+    # away. Downstream that made category-based preference useless for
+    # third-party patches and produced the conclusion that "Surge has 4
+    # percussion presets" when there are 145 `Drums` + 94 `Percussion` files
+    # on disk.
+    subcategory: str = ""
     roles: list[str] = field(default_factory=list)
 
 
@@ -44,7 +56,17 @@ def _load_overrides() -> dict[str, list[str]]:
 
 
 def _matches_any(text: str, keywords: list[str]) -> bool:
-    return any(k.lower() in text for k in keywords)
+    """WORD-boundary match, not substring.
+
+    Substring matching cut both ways and was wrong in both directions:
+    `Harpsichord`, `Sharp Lead` and `Guitarp` were globally rejected for
+    containing "arp" (34 patches lost), while `Chatter`, `That Comb Magic` and
+    `Hate` were assigned the `hat` role and went on to become hi-hat anchors.
+    A keyword is a word.
+    """
+    return any(
+        re.search(rf"\b{re.escape(k.lower())}\b", text) for k in keywords
+    )
 
 
 def assign_roles(name: str, path_parts: list[str], rules: dict) -> list[str]:
@@ -57,16 +79,44 @@ def assign_roles(name: str, path_parts: list[str], rules: dict) -> list[str]:
         return []
 
     assigned: list[str] = []
+    perc_roles = ("kick", "snare", "hat")
+
+    def allowed(role: str) -> bool:
+        return not _matches_any(
+            lname, rules["roles"][role].get("reject_keywords", [])
+        )
+
+    # Which drum does the NAME claim to be? A specific claim settles it.
+    named_perc = [
+        role
+        for role in perc_roles
+        if allowed(role)
+        and _matches_any(lname, rules["roles"][role].get("keywords", []))
+    ]
+
     for role in ROLES:
         r = rules["roles"][role]
-        if _matches_any(lname, r.get("reject_keywords", [])):
+        if not allowed(role):
             continue
         in_category = any(part in r.get("categories", []) for part in path_parts)
         by_keyword = _matches_any(lname, r.get("keywords", []))
-        # Category alone is enough for melodic roles; percussion roles need a
-        # keyword hit because Percussion mixes kicks/snares/toms/other.
-        if role in ("kick", "snare", "hat"):
-            if by_keyword and (in_category or "Percussion" not in path_parts):
+
+        if role in perc_roles:
+            # The filename says WHICH drum; the folder only says THAT it is a
+            # drum. So a specific name wins outright — `Kick 909ish` must not
+            # also become a hi-hat candidate just for sitting in Percussion/.
+            # Only when the name claims nothing ("Perc 7", "Tom L") does folder
+            # membership admit it to all three, because an unlabelled drum is a
+            # useful neighbour on any drum tour and we cannot tell which.
+            #
+            # Previously ONLY the keyword counted (the folder guard was a
+            # tautology — verified over 8980 evaluations, it never changed an
+            # outcome), so the pools were pure filename matches: 51/60/61
+            # candidates against the 239 files in drum folders.
+            if named_perc:
+                if role in named_perc:
+                    assigned.append(role)
+            elif in_category:
                 assigned.append(role)
         elif in_category or by_keyword:
             assigned.append(role)
@@ -106,6 +156,9 @@ def scan(cfg: LabConfig | None = None) -> list[CorpusEntry]:
                     name=name,
                     source=source,
                     category=parts[0] if parts else "",
+                    # third-party: author/SUBCATEGORY/patch — factory: the
+                    # category folder is already parts[0]
+                    subcategory=parts[-1] if parts else "",
                     roles=roles,
                 )
             )

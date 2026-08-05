@@ -136,6 +136,90 @@ def edges(
 
 
 @app.command()
+def tour(
+    anchors: int = typer.Option(20, help="target anchors per role"),
+    cap: int = typer.Option(400, help="max candidates screened per role"),
+    keep: int = typer.Option(40, help="screened survivors kept for edges"),
+    k: int = typer.Option(4, help="nearest neighbours proposed per anchor"),
+    points: int = typer.Option(3, help="interior points rendered per hop"),
+    role: list[str] = typer.Option(None, help="restrict to specific roles"),
+    out: str = typer.Option("tour.json", help="artifact filename in workspace/"),
+) -> None:
+    """Build the SHIPPED dial: a validated tour through many presets per role."""
+    from timbre_graph_lab.morph import save_graph
+    from timbre_graph_lab.tour import build_tour_graph
+
+    cfg = LabConfig()
+    path = cfg.workspace / out
+    graph = build_tour_graph(
+        cfg, roles=list(role) if role else None, anchors=anchors, cap=cap,
+        keep=keep, k=k, n_interior=points, save_to=path,
+    )
+    save_graph(graph, path)
+
+    table = Table(title="tour")
+    for col in ("role", "screened", "passed", "thru lens", "edges", "anchors",
+                "min hop"):
+        table.add_column(col, justify="left" if col == "role" else "right")
+    for r, q in graph["quality"].items():
+        if r == "_summary":
+            continue
+        shipped = len(q["anchors"])
+        table.add_row(
+            r,
+            f"{q['n_pool']}{'*' if q['capped'] else ''}",
+            str(q["n_passed"]),
+            str(q.get("n_through_lens", "-")),
+            f"{q.get('n_edges_valid', 0)}/{q.get('n_edges_proposed', 0)}",
+            f"{shipped}/{anchors}" + (" SHORT" if q.get("shortfall") else ""),
+            str(q.get("sweep", {}).get("worst_hop_travel", "-")),
+        )
+    console.print(table)
+
+    cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+    report = cfg.reports_dir / "tour-report.json"
+    report.write_text(json.dumps(graph["quality"], indent=1))
+    console.print(f"artifact -> {path}\nreport   -> {report}")
+
+
+@app.command()
+def patchmap(
+    cap: int = typer.Option(200, help="max candidates screened per role"),
+    points: int = typer.Option(40, help="anchors laid out on each role's map"),
+    grid: int = typer.Option(10, help="NxN blend positions rendered to validate"),
+    lenses: int = typer.Option(3, help="alternative worlds per role"),
+    role: list[str] = typer.Option(None, help="restrict to specific roles"),
+    out: str = typer.Option("patchmap.json", help="artifact filename in workspace/"),
+) -> None:
+    """Build the SHIPPED X/Y patch map: every point on it a checked sound."""
+    from timbre_graph_lab.mapbuild import build_map_graph
+    from timbre_graph_lab.morph import save_graph
+
+    cfg = LabConfig()
+    path = cfg.workspace / out
+    graph = build_map_graph(
+        cfg, roles=list(role) if role else None, cap=cap, n_points=points,
+        grid_n=grid, n_lenses=lenses, save_to=path,
+    )
+    save_graph(graph, path)
+
+    table = Table(title="patch map")
+    for col in ("role", "screened", "passed", "lenses", "points per lens"):
+        table.add_column(col, justify="left" if col == "role" else "right")
+    for r, q in graph["quality"].items():
+        if r == "_summary":
+            continue
+        ls = graph["roles"][r]["lenses"]
+        table.add_row(
+            r, str(q.get("n_pool", "-")), str(q.get("n_passed", "-")),
+            str(len(ls)),
+            ", ".join(str(len(l["points"])) for l in ls) or "-",
+        )
+    console.print(table)
+    console.print(f"artifact -> {path}")
+
+
+@app.command()
 def train(
     epochs: int = 60,
     batch_size: int = 512,

@@ -179,3 +179,48 @@ def test_core_params_resolve_and_are_shared_across_anchors():
     assert ca == cb                       # identical across anchors
     assert "a_filter_1_cutoff" in ca and "a_highpass" in ca
     assert "a_some_obscure_thing" not in ca
+
+
+# ---------------------------------------------------------------------------
+# qc_loudness — the ANCHOR-acceptance gate (Steve was hurt twice, 2026-08-03)
+# ---------------------------------------------------------------------------
+
+from timbre_graph_lab.worker import SAFE_PEAK, SAFE_RMS, qc_loudness
+
+
+def test_loudness_gate_rejects_what_the_measurement_gate_allows():
+    """The distinction that matters: a hot render is a fine MEASUREMENT and a
+    dangerous DESTINATION. Same audio, two answers."""
+    hot = _tone(amp=3.5)
+    assert qc_audio(hot).ok                    # measurable
+    assert not qc_loudness(hot).ok             # not somewhere to land
+    assert qc_loudness(hot).reason == "too-loud"
+
+
+def test_loudness_gate_passes_ordinary_levels():
+    for amp in (0.05, 0.3, 0.9):
+        qc = qc_loudness(_tone(amp=amp))
+        assert qc.ok, f"amp {amp}: {qc.reason}"
+
+
+def test_loudness_gate_catches_sustained_loudness_not_just_peaks():
+    # peak under the ceiling, RMS over it: a relentless wall, not a transient
+    wall = np.full(SR, SAFE_PEAK - 0.5, dtype=np.float32)
+    wall[::2] *= -1                            # avoid the flat-top detector
+    assert wall.max() < SAFE_PEAK
+    assert np.sqrt(np.mean(wall**2)) > SAFE_RMS
+    assert not qc_loudness(wall).ok
+
+
+def test_loudness_gate_inherits_every_measurement_rejection():
+    assert not qc_loudness(np.zeros(SR, dtype=np.float32)).ok        # silent
+    assert qc_loudness(np.clip(_tone(3.5), -1, 1).astype(np.float32)).reason == "clipping"
+
+
+def test_flat_topping_is_caught_at_any_level():
+    """The old gate only looked for flat tops BELOW unity, so exactly the loud
+    clipped renders worth catching skipped the test."""
+    loud_clipped = np.clip(_tone(amp=8.0), -3.0, 3.0).astype(np.float32)
+    qc = qc_audio(loud_clipped)
+    assert qc.peak > 1.0
+    assert not qc.ok and qc.reason == "clipping"
