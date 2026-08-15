@@ -34,6 +34,7 @@ import {
 import {
   createTimbreGraphAdapter,
   primeGroupConfigs,
+  rearmSafetyLimiters,
 } from './src/timbre-graph-adapter';
 import {
   APP_ROLE_TOKENS,
@@ -694,6 +695,24 @@ export function TimbreGraphPanel(props: PluginUIProps) {
     },
     [],
   );
+
+  /**
+   * EAR SAFETY: re-arm the brickwall limiter on every adoption/discovery pass.
+   *
+   * Each track is armed at creation (adapter.onTrackCreated), but the host
+   * strips ALL built-in FX — the limiter included — from the project file on
+   * every load, so a reopened project would play unprotected. panel-core's
+   * loadTracks replaces `core.tracks` wholesale after each adoption pass
+   * (mount, scene change, `onEngineReady` after a project load, post-agent-
+   * mutation reload), and each pass carries FRESH handle objects; in-place
+   * row patches keep their handles. rearmSafetyLimiters keys on handle
+   * identity, so this fires once per track per discovery pass — never on
+   * progress ticks or mixer churn — and the host-side apply is idempotent.
+   */
+  const armedHandlesRef = useRef<WeakSet<object>>(new WeakSet());
+  useEffect(() => {
+    rearmSafetyLimiters(props.host, core.tracks, armedHandlesRef.current);
+  }, [core.tracks, props.host]);
 
   // Group membership comes from the scene-data meta the core has resolved.
   // Kept in a ref so the resolver stays referentially stable.

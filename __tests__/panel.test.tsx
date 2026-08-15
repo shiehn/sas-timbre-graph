@@ -1072,7 +1072,9 @@ describe('every timbre track gets a safety limiter', () => {
    * Two patches "started screaming" and hurt the user during a dial sweep.
    * Anchors are loudness-normalized at build time, but the space BETWEEN
    * them cannot be exhaustively enumerated, so the track carries a brickwall
-   * as a last line.
+   * as a last line. Since SDK 3.0.0 the host arms it by INTENT
+   * (`applyManagedFxPreset(id, 'safety-limiter')`) — there is no FX category
+   * or preset index left for this repo to keep in sync.
    */
   async function addGraph(host: Record<string, unknown>): Promise<void> {
     const adapter = createTimbreGraphAdapter(host as never);
@@ -1093,33 +1095,22 @@ describe('every timbre track gets a safety limiter', () => {
       createTrack: async ({ role }: { role: string }) => ({
         id: `engine-${role}`, name: role, dbId: `db-${role}`,
       }),
-      toggleTrackFx: async (id: string, cat: string, on: boolean) => {
-        calls.push(`toggle:${id}:${cat}:${on}`);
-      },
-      setTrackFxPreset: async (id: string, cat: string, idx: number) => {
-        calls.push(`preset:${id}:${cat}:${idx}`);
+      applyManagedFxPreset: async (id: string, intent: string) => {
+        calls.push(`arm:${id}:${intent}`);
       },
     };
   }
 
-  it('arms the brickwall on all six tracks', async () => {
+  it('arms the brickwall on all six tracks at creation', async () => {
     const calls: string[] = [];
     await addGraph(makeHost(calls));
-    const armed = calls.filter((c) => c.startsWith('toggle:'));
+    const armed = calls.filter((c) => c.startsWith('arm:'));
     expect(armed).toHaveLength(6);
-    expect(armed.every((c) => c.endsWith(':compressor:true'))).toBe(true);
+    expect(armed.every((c) => c.endsWith(':safety-limiter'))).toBe(true);
+    expect(armed[0]).toBe('arm:engine-kick:safety-limiter'); // anchor first
   });
 
-  it('selects the limiter preset, not some other compressor', async () => {
-    const calls: string[] = [];
-    await addGraph(makeHost(calls));
-    const presets = calls.filter((c) => c.startsWith('preset:'));
-    expect(presets).toHaveLength(6);
-    // index 4 == 'Limiter / Safety', pinned by sas-app's contract test
-    expect(presets.every((c) => c.endsWith(':compressor:4'))).toBe(true);
-  });
-
-  it('still creates the group when the host cannot arm a limiter', async () => {
+  it('still creates the group on an older host, and SAYS the guard is gone', async () => {
     const created: string[] = [];
     const host = {
       setTrackRole: async () => {},
@@ -1129,10 +1120,159 @@ describe('every timbre track gets a safety limiter', () => {
         created.push(role);
         return { id: `engine-${role}`, name: role, dbId: `db-${role}` };
       },
-      // no toggleTrackFx at all — an older host
+      // no applyManagedFxPreset at all — a pre-3.0.0 host
     };
-    await addGraph(host as never);
-    expect(created).toHaveLength(5);   // the five siblings still got made
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await addGraph(host as never);
+      expect(created).toHaveLength(5);   // the five siblings still got made
+      // degradation is visible, not silent: one warning per unprotected track
+      const limiterWarns = warn.mock.calls.filter((c) =>
+        /safety limiter/i.test(String(c[0])),
+      );
+      expect(limiterWarns).toHaveLength(6);
+      expect(String(limiterWarns[0][0])).toMatch(/applyManagedFxPreset/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('an arm failure warns and continues — creation never aborts on the guard', async () => {
+    const created: string[] = [];
+    const host = {
+      setTrackRole: async () => {},
+      setSceneData: async () => {},
+      applySurgeFxpPreset: async () => {},
+      createTrack: async ({ role }: { role: string }) => {
+        created.push(role);
+        return { id: `engine-${role}`, name: role, dbId: `db-${role}` };
+      },
+      applyManagedFxPreset: async () => {
+        throw new Error('engine busy');
+      },
+    };
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await addGraph(host as never);
+      expect(created).toHaveLength(5);
+      const limiterWarns = warn.mock.calls.filter((c) =>
+        /could not arm the safety limiter/i.test(String(c[0])),
+      );
+      expect(limiterWarns).toHaveLength(6);
+      expect(String(limiterWarns[0][0])).toMatch(/painful levels/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('the limiter survives project reloads (re-arm on adoption passes)', () => {
+  /**
+   * The host strips ALL built-in FX — the ear-safety brickwall included —
+   * from the project file on every load, so arming only at track creation
+   * left every reopened project unprotected. The panel re-arms via
+   * rearmSafetyLimiters on each adoption/discovery pass: panel-core's
+   * loadTracks hands back FRESH handle objects per pass, while in-place row
+   * patches (progress ticks, mixer churn) keep their handle references —
+   * handle identity is the pass detector.
+   */
+  const { armSafetyLimiter, rearmSafetyLimiters } =
+    require('../src/timbre-graph-adapter');
+
+  const track = (id: string) => ({ handle: { id, dbId: `db-${id}` } });
+
+  function armHost(calls: string[]): Record<string, unknown> {
+    return {
+      applyManagedFxPreset: async (id: string, intent: string) => {
+        calls.push(`${id}:${intent}`);
+      },
+    };
+  }
+
+  it('arms every owned track once per discovery pass', () => {
+    const calls: string[] = [];
+    rearmSafetyLimiters(
+      armHost(calls) as never,
+      [track('e1'), track('e2'), track('e3')],
+      new WeakSet(),
+    );
+    expect(calls).toEqual([
+      'e1:safety-limiter',
+      'e2:safety-limiter',
+      'e3:safety-limiter',
+    ]);
+  });
+
+  it('does not spam on in-place row patches (same handle objects)', () => {
+    const calls: string[] = [];
+    const host = armHost(calls) as never;
+    const armed = new WeakSet<object>();
+    const rows = [track('e1'), track('e2')];
+    rearmSafetyLimiters(host, rows, armed);
+    // a progress tick / mute toggle spreads the row but KEEPS t.handle —
+    // running the pass again with the same handles must send nothing
+    rearmSafetyLimiters(host, rows.map((r) => ({ ...r })), armed);
+    rearmSafetyLimiters(host, rows, armed);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('re-arms when a pass hands back fresh handles — the project-reload shape', () => {
+    const calls: string[] = [];
+    const host = armHost(calls) as never;
+    const armed = new WeakSet<object>();
+    rearmSafetyLimiters(host, [track('e1'), track('e2')], armed);
+    // reopening a project: onEngineReady → loadTracks → getPluginTracks
+    // returns NEW handle objects for the SAME engine ids, and the host has
+    // just stripped the limiter — this pass is the one that must fire again
+    rearmSafetyLimiters(host, [track('e1'), track('e2')], armed);
+    expect(calls).toEqual([
+      'e1:safety-limiter', 'e2:safety-limiter',
+      'e1:safety-limiter', 'e2:safety-limiter',
+    ]);
+  });
+
+  it('warns and continues on an older host instead of throwing mid-render', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(() =>
+        rearmSafetyLimiters({} as never, [track('e1')], new WeakSet()),
+      ).not.toThrow();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toMatch(/safety limiter/i);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a rejected arm warns and resolves', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await armSafetyLimiter(
+        {
+          applyManagedFxPreset: async () => {
+            throw new Error('no such track');
+          },
+        } as never,
+        'e9',
+      );
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('e9');
+      expect(String(warn.mock.calls[0][0])).toMatch(/painful levels/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('the panel wires the re-arm into its track-discovery effect', () => {
+    // The effect itself needs the full panel-core host surface to mount, so
+    // pin the wiring at the source level: the helper must be called from
+    // TimbreGraphPanel (the discovery seam), not only from track creation.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'TimbreGraphPanel.tsx'),
+      'utf8',
+    );
+    expect(src).toMatch(/rearmSafetyLimiters\(/);
+    expect(src).toMatch(/core\.tracks/);
   });
 });
 

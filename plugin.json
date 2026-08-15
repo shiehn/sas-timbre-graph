@@ -8,7 +8,7 @@
   "main": "dist/index.js",
   "author": "Steve Hiehn",
   "icon": "icon.svg",
-  "minHostVersion": "2.0.0",
+  "minHostVersion": "3.0.0",
   "builtIn": true,
   "capabilities": {
     "requiresLLM": true,

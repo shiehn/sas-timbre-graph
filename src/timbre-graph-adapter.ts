@@ -62,11 +62,75 @@ import { BUNDLED_GRAPH } from './bundled-graph';
 const ACCENT = '#2DD4BF'; // teal — distinct from synth violet / bass amber
 
 /**
- * Index of 'Limiter / Safety' in the host's compressor preset table.
- * Guarded by sas-app's `limiter-preset-contract.test.ts` — the host resolves
- * this index against ITS copy of the table, and the SDK's copy has drifted.
+ * Arm the host-managed brickwall limiter on a track. EAR SAFETY, not tone.
+ *
+ * The dial writes ~80 continuous parameters at once, and some combinations
+ * put a Surge filter into self-oscillation. Two of them "started screaming"
+ * in live play and hurt the user (2026-08-03). The anchors are
+ * loudness-normalized at build time so this should almost never engage — it
+ * is the last line, for the space BETWEEN anchors that no build gate can
+ * enumerate.
+ *
+ * SDK 3.0.0 removed the built-in FX surface; the limiter is now armed by
+ * INTENT (`applyManagedFxPreset(id, 'safety-limiter')`) and the host resolves
+ * the actual preset internally — no more cross-repo preset-index contract to
+ * drift. The host-side apply is idempotent, so callers re-arm freely.
+ *
+ * Every failure path warns and continues: a missing limiter must never block
+ * track creation or adoption, but it must be visible in the log.
  */
-const LIMITER_PRESET_INDEX = 4;
+export async function armSafetyLimiter(
+  host: PluginHost,
+  trackId: string,
+): Promise<void> {
+  if (typeof host.applyManagedFxPreset !== 'function') {
+    console.warn(
+      `[TimbreGraphPanel] host cannot arm the safety limiter on ${trackId} ` +
+        `(needs SDK 3.0.0 applyManagedFxPreset) — the dial can still reach ` +
+        `painful levels`,
+    );
+    return;
+  }
+  try {
+    await host.applyManagedFxPreset(trackId, 'safety-limiter');
+  } catch (err) {
+    console.warn(
+      `[TimbreGraphPanel] could not arm the safety limiter on ${trackId} — ` +
+        `the dial can still reach painful levels`,
+      err,
+    );
+  }
+}
+
+/**
+ * One re-arm pass over the tracks a discovery/adoption cycle handed back.
+ *
+ * Arming only at creation is not enough: the host STRIPS all built-in FX —
+ * this limiter included — from the project file on every load, so a reopened
+ * project came back unprotected. The panel therefore re-arms on every
+ * adoption pass (see the `core.tracks` effect in TimbreGraphPanel).
+ *
+ * `armedHandles` is NOT dedup-for-correctness (the host-side apply is
+ * idempotent); it is a PASS detector. panel-core's loadTracks rebuilds every
+ * row around fresh handle objects from `getPluginTracks()` — on mount, on
+ * scene change, on `onEngineReady` after a project load, and after agent
+ * mutations — while in-place row patches (generation progress ticks,
+ * mute/volume changes) spread the row but keep `t.handle` by reference. So
+ * keying on handle identity fires exactly once per track per discovery pass
+ * and never on render/state churn. Fire-and-forget: failures warn inside
+ * armSafetyLimiter.
+ */
+export function rearmSafetyLimiters(
+  host: PluginHost,
+  tracks: ReadonlyArray<{ handle: { id: string } }>,
+  armedHandles: WeakSet<object>,
+): void {
+  for (const t of tracks) {
+    if (armedHandles.has(t.handle)) continue;
+    armedHandles.add(t.handle);
+    void armSafetyLimiter(host, t.handle.id);
+  }
+}
 
 /**
  * Per-group mode, cached so the row can render synchronously.
@@ -249,32 +313,10 @@ export function createTimbreGraphAdapter(
     ): Promise<void> {
       const groupId = handle.dbId;
 
-      /**
-       * Arm a brickwall limiter on the track. EAR SAFETY, not tone.
-       *
-       * The dial writes ~80 continuous parameters at once, and some
-       * combinations put a Surge filter into self-oscillation. Two of them
-       * "started screaming" in live play and hurt the user (2026-08-03). The
-       * anchors are loudness-normalized at build time so this should almost
-       * never engage — it is the last line, for the space BETWEEN anchors
-       * that no build gate can enumerate.
-       *
-       * Index resolves against the HOST's preset table, pinned by
-       * `limiter-preset-contract.test.ts` in sas-app.
-       */
-      const armLimiter = async (trackId: string): Promise<void> => {
-        if (typeof host.toggleTrackFx !== 'function') return;
-        try {
-          await host.toggleTrackFx(trackId, 'compressor', true);
-          await host.setTrackFxPreset?.(trackId, 'compressor', LIMITER_PRESET_INDEX);
-        } catch (err) {
-          console.warn(
-            `[TimbreGraphPanel] could not arm the safety limiter on ${trackId} — ` +
-              `the dial can still reach painful levels`,
-            err,
-          );
-        }
-      };
+      // Every newborn gets the ear-safety brickwall (armSafetyLimiter has
+      // the full why). Creation-time arming is only half the story: the host
+      // strips built-in FX on project load, so the panel ALSO re-arms on
+      // every adoption pass (rearmSafetyLimiters).
 
       /**
        * Restore the shipped map's ORIGIN patch for a role, so the group
@@ -319,7 +361,7 @@ export function createTimbreGraphAdapter(
         { groupId, memberIndex: 0, role: 'kick' },
       );
       await applyAnchor(handle.id, 'kick');
-      await armLimiter(handle.id);
+      await armSafetyLimiter(host, handle.id);
 
       for (let i = 1; i < TIMBRE_ROLES.length; i++) {
         const role = TIMBRE_ROLES[i];
@@ -335,7 +377,7 @@ export function createTimbreGraphAdapter(
           { groupId, memberIndex: i, role },
         );
         await applyAnchor(sibling.id, role);
-        await armLimiter(sibling.id);
+        await armSafetyLimiter(host, sibling.id);
       }
     },
 

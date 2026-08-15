@@ -38,7 +38,7 @@
   "author": "Steve Hiehn",
   "license": "MIT",
   "peerDependencies": {
-    "@signalsandsorcery/plugin-sdk": "^2.55.0",
+    "@signalsandsorcery/plugin-sdk": "^3.0.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0"
   },
